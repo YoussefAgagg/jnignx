@@ -1,0 +1,17 @@
+{
+  "routes": {
+    "/api": [
+      "http://localhost:3000",
+      "http://localhost:3001"
+    ],
+    "/static": [
+      "http://localhost:8081"
+    ],
+    "/health": [
+      "http://localhost:3000"
+    ],
+    "/": [
+      "http://localhost:3000"
+    ]
+  }
+}
