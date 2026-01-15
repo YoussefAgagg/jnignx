@@ -1,9 +1,8 @@
 package com.github.youssefagagg.jnignx;
 
+import com.github.youssefagagg.jnignx.core.Router;
+import com.github.youssefagagg.jnignx.core.ServerLoop;
 import java.io.IOException;
-import java.net.InetSocketAddress;
-import java.nio.channels.ServerSocketChannel;
-import java.nio.channels.SocketChannel;
 import java.nio.file.Path;
 
 /**
@@ -51,7 +50,7 @@ public final class NanoServer {
 
   private final int port;
   private final Router router;
-  private volatile boolean running;
+  private final ServerLoop serverLoop;
 
   /**
    * Creates a new NanoServer with the specified port and configuration file.
@@ -62,7 +61,7 @@ public final class NanoServer {
   public NanoServer(int port, Path configPath) {
     this.port = port;
     this.router = new Router(configPath);
-    this.running = true;
+    this.serverLoop = new ServerLoop(port, router);
   }
 
   /**
@@ -121,37 +120,17 @@ public final class NanoServer {
     // Start hot-reload watcher in a virtual thread
     router.startHotReloadWatcher();
 
-    try (ServerSocketChannel serverChannel = ServerSocketChannel.open()) {
-      serverChannel.bind(new InetSocketAddress(port));
+    printStartupBanner();
 
-      printStartupBanner();
-
-      // Main accept loop - runs forever until shutdown
-      while (running) {
-        try {
-          SocketChannel clientChannel = serverChannel.accept();
-
-          // Spawn a new Virtual Thread for each connection
-          // Virtual threads are extremely lightweight (~1KB stack)
-          // compared to platform threads (~1MB stack)
-          Thread.startVirtualThread(new ReverseProxyHandler(clientChannel, router));
-
-        } catch (IOException e) {
-          if (running) {
-            System.err.println("[Server] Error accepting connection: " + e.getMessage());
-          }
-        }
-      }
-    } finally {
-      router.stop();
-    }
+    // Start the accept loop
+    serverLoop.start();
   }
 
   /**
    * Initiates graceful shutdown of the server.
    */
   public void shutdown() {
-    running = false;
+    serverLoop.stop();
     router.stop();
     System.out.println("[Server] Shutdown initiated");
   }

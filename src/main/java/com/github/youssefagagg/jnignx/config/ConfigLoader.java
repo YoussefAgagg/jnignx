@@ -1,29 +1,39 @@
-package com.github.youssefagagg.jnignx;
+package com.github.youssefagagg.jnignx.config;
 
+import java.io.IOException;
+import java.nio.file.Files;
+import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 
 /**
- * A minimal, reflection-free JSON parser specifically designed for parsing routes.json.
- * This parser is GraalVM Native Image compatible as it uses no reflection.
+ * Loads and parses configuration for NanoServer.
+ * Handles parsing of routes.json.
  *
- * <p>Supports only the subset of JSON needed for route configuration:
- * <ul>
- *   <li>Objects with string keys</li>
- *   <li>Arrays of strings</li>
- *   <li>String values</li>
- * </ul>
+ * <p>This class replaces the old SimpleJsonParser and adds file loading capabilities.
  */
-public final class SimpleJsonParser {
+public final class ConfigLoader {
 
   private final String json;
   private int pos;
 
-  private SimpleJsonParser(String json) {
+  private ConfigLoader(String json) {
     this.json = json;
     this.pos = 0;
+  }
+
+  /**
+   * Loads configuration from a file.
+   *
+   * @param path path to the configuration file
+   * @return the parsed RouteConfig
+   * @throws IOException if the file cannot be read
+   */
+  public static RouteConfig load(Path path) throws IOException {
+    String json = Files.readString(path);
+    return parseRouteConfig(json);
   }
 
   /**
@@ -35,7 +45,7 @@ public final class SimpleJsonParser {
    * @throws IllegalArgumentException if the JSON is malformed
    */
   public static RouteConfig parseRouteConfig(String json) {
-    SimpleJsonParser parser = new SimpleJsonParser(json);
+    ConfigLoader parser = new ConfigLoader(json);
     Map<String, Object> root = parser.parseObject();
 
     @SuppressWarnings("unchecked")

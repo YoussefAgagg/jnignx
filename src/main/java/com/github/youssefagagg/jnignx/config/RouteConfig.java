@@ -1,4 +1,4 @@
-package com.github.youssefagagg.jnignx;
+package com.github.youssefagagg.jnignx.config;
 
 import java.util.List;
 import java.util.Map;

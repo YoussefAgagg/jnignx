@@ -1,5 +1,7 @@
-package com.github.youssefagagg.jnignx;
+package com.github.youssefagagg.jnignx.core;
 
+import com.github.youssefagagg.jnignx.config.ConfigLoader;
+import com.github.youssefagagg.jnignx.config.RouteConfig;
 import java.io.IOException;
 import java.nio.file.Files;
 import java.nio.file.Path;
@@ -55,8 +57,7 @@ public final class Router {
    */
   public void loadConfig() throws IOException {
     if (Files.exists(configPath)) {
-      String json = Files.readString(configPath);
-      RouteConfig newConfig = SimpleJsonParser.parseRouteConfig(json);
+      RouteConfig newConfig = ConfigLoader.load(configPath);
       configRef.set(newConfig);
       lastModified = Files.getLastModifiedTime(configPath);
       System.out.println("[Router] Loaded configuration from " + configPath);
@@ -101,8 +102,7 @@ public final class Router {
 
     FileTime currentModified = Files.getLastModifiedTime(configPath);
     if (lastModified == null || currentModified.compareTo(lastModified) > 0) {
-      String json = Files.readString(configPath);
-      RouteConfig newConfig = SimpleJsonParser.parseRouteConfig(json);
+      RouteConfig newConfig = ConfigLoader.load(configPath);
 
       // Atomic swap - ensures thread safety for active requests
       RouteConfig oldConfig = configRef.getAndSet(newConfig);
