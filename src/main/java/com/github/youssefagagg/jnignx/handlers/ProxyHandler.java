@@ -12,7 +12,7 @@ import java.nio.charset.StandardCharsets;
 import java.util.Map;
 
 /**
- * Handles reverse proxying to backend servers.
+ * Handles reverse proxying to backend servers with proper header forwarding.
  */
 public class ProxyHandler {
 
@@ -44,8 +44,9 @@ public class ProxyHandler {
     try (SocketChannel backendChannel = SocketChannel.open()) {
       backendChannel.connect(new InetSocketAddress(host, port));
 
-      // 1. Send modified headers (Connection: close)
-      byte[] newHeaders = reconstructHeadersWithClose(request);
+      // 1. Send modified headers with X-Forwarded-* headers
+      String clientIp = extractClientIp(clientChannel);
+      byte[] newHeaders = reconstructHeaders(request, clientIp, host);
       ByteBuffer headersBuf = ByteBuffer.wrap(newHeaders);
       while (headersBuf.hasRemaining()) {
         backendChannel.write(headersBuf);
@@ -93,6 +94,41 @@ public class ProxyHandler {
         Thread.currentThread().interrupt();
       }
     }
+  }
+
+  private String extractClientIp(SocketChannel channel) {
+    try {
+      return channel.getRemoteAddress().toString().split(":")[0].replace("/", "");
+    } catch (IOException e) {
+      return "unknown";
+    }
+  }
+
+  private byte[] reconstructHeaders(Request request, String clientIp, String backendHost) {
+    StringBuilder sb = new StringBuilder();
+    sb.append(request.method()).append(" ")
+      .append(request.path()).append(" ")
+      .append(request.version()).append("\r\n");
+
+    // Forward existing headers (except Connection, Host)
+    for (Map.Entry<String, String> entry : request.headers().entrySet()) {
+      String key = entry.getKey();
+      if (!key.equalsIgnoreCase("Connection") &&
+          !key.equalsIgnoreCase("Host") &&
+          !key.startsWith("X-Forwarded-")) {
+        sb.append(key).append(": ").append(entry.getValue()).append("\r\n");
+      }
+    }
+
+    // Add proxy headers
+    sb.append("Host: ").append(backendHost).append("\r\n");
+    sb.append("Connection: close\r\n");
+    sb.append("X-Forwarded-For: ").append(clientIp).append("\r\n");
+    sb.append("X-Forwarded-Proto: http\r\n");
+    sb.append("X-Real-IP: ").append(clientIp).append("\r\n");
+    sb.append("\r\n");
+
+    return sb.toString().getBytes(StandardCharsets.UTF_8);
   }
 
   private byte[] reconstructHeadersWithClose(Request request) {
