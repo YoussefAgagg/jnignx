@@ -18,7 +18,7 @@ throughput and minimum latency. Combines the performance of Nginx with the usabi
 - **Least Connections**: Routes to the backend with fewest active connections
 - **IP Hash**: Consistent hashing for sticky sessions based on client IP
 - **Health Checking**: Active and passive health checks with automatic backend removal/recovery
-- **Circuit Breaker**: Fast failure for known-bad backends
+- **Circuit Breaker**: Fast failure for known-bad backends with automatic recovery
 
 ### Observability
 
@@ -30,20 +30,32 @@ throughput and minimum latency. Combines the performance of Nginx with the usabi
     - Bytes sent/received
     - Backend health status
     - Uptime tracking
+- **Admin API**: RESTful API for runtime management at `/admin/*`
 
 ### Security & Reliability
 
-- **TLS/HTTPS Support**: SSL/TLS termination with SSLEngine
+- **TLS/HTTPS Support**: Full SSL/TLS termination with SSLEngine
+- **HTTP/2 with ALPN**: Protocol negotiation for HTTP/2 over TLS
+- **Rate Limiting**: Token bucket, sliding window, and fixed window algorithms
+- **Circuit Breaker**: Automatic failure detection and recovery
 - **Header Forwarding**: Automatic `X-Forwarded-For`, `X-Real-IP`, `X-Forwarded-Proto` headers
 - **Path Traversal Protection**: Security checks for static file serving
 - **Graceful Shutdown**: Clean connection handling on server stop
+- **ACME/Let's Encrypt**: Automatic certificate provisioning (experimental)
+
+### Advanced Features
+
+- **WebSocket Support**: Full WebSocket protocol with transparent proxying
+- **HTTP/2**: Multiplexed streams, server push, HPACK compression
+- **Compression**: Automatic gzip/brotli compression for text assets
+- **Admin API**: Runtime configuration and monitoring endpoints
 
 ### Static File Serving
 
 - **Zero-Copy Transfer**: Efficient file serving using `FileChannel.transferTo()`
 - **MIME Types**: Automatic content-type detection
 - **Directory Listing**: Auto-generated HTML directory indexes
-- **Gzip Compression**: On-the-fly compression for text assets
+- **Compression**: On-the-fly gzip/brotli compression for text assets
 - **Cache Headers**: `ETag` and `Last-Modified` support
 
 ## 📋 Requirements
@@ -221,24 +233,31 @@ jnignx/
     │   ├── ConfigLoader.java # JSON configuration parser
     │   └── RouteConfig.java  # Immutable route configuration
     ├── core/
-    │   ├── ServerLoop.java   # Main accept loop
+    │   ├── ServerLoop.java   # Main accept loop with TLS support
     │   ├── Worker.java       # Request handler (virtual thread)
     │   ├── Router.java       # Hot-reload router with health checks
     │   ├── LoadBalancer.java # Load balancing strategies
-    │   └── HealthChecker.java # Backend health monitoring
+    │   ├── HealthChecker.java # Backend health monitoring
+    │   ├── RateLimiter.java  # Rate limiting (token bucket, sliding window)
+    │   └── CircuitBreaker.java # Circuit breaker pattern
     ├── handlers/
     │   ├── ProxyHandler.java # Zero-copy reverse proxy
-    │   └── StaticHandler.java # Static file serving
+    │   ├── StaticHandler.java # Static file serving
+    │   ├── WebSocketHandler.java # WebSocket protocol support
+    │   └── AdminHandler.java # Admin API endpoints
     ├── http/
     │   ├── HttpParser.java   # HTTP/1.1 parser
+    │   ├── Http2Handler.java # HTTP/2 protocol handler
     │   ├── Request.java      # Request model
     │   ├── Response.java     # Response model
     │   └── ResponseWriter.java # Response writer utility
     ├── tls/
-    │   └── SslWrapper.java   # TLS/HTTPS support
+    │   ├── SslWrapper.java   # TLS/HTTPS support with ALPN
+    │   └── AcmeClient.java   # Let's Encrypt ACME client
     └── util/
         ├── AccessLogger.java # Structured JSON logging
-        └── MetricsCollector.java # Prometheus metrics
+        ├── MetricsCollector.java # Prometheus metrics
+        └── CompressionUtil.java # Gzip/Brotli compression
 ```
 
 ## 📈 Performance Tips
@@ -251,8 +270,24 @@ jnignx/
     - Round-robin for even distribution
     - Least connections for variable request durations
     - IP hash for session persistence
+6. **Enable Compression**: Reduces bandwidth for text content
+7. **Configure Rate Limiting**: Protect against traffic spikes
+8. **Use Circuit Breakers**: Prevent cascading failures
 
-## 🔧 Advanced Configuration
+### Automatic HTTPS with Let's Encrypt
+
+Use ACME client for automatic certificate provisioning:
+
+```java
+AcmeClient acme = new AcmeClient("admin@example.com", "example.com", "www.example.com");
+Path certPath = acme.obtainCertificate();
+acme.
+
+startAutoRenewal(); // Auto-renew before expiration
+
+// Use the certificate
+SslWrapper ssl = new SslWrapper(certPath.toString(), "changeit");
+```
 
 ### Load Balancing Strategy
 
@@ -269,6 +304,116 @@ Router router = new Router(configPath, LoadBalancer.Strategy.LEAST_CONNECTIONS);
 Router router = new Router(configPath, LoadBalancer.Strategy.IP_HASH);
 ```
 
+### Rate Limiting
+
+Configure rate limiting per client:
+
+```java
+// Token bucket: 100 requests per second per client
+RateLimiter rateLimiter = new RateLimiter(
+        RateLimiter.Strategy.TOKEN_BUCKET,
+        100,
+        Duration.ofSeconds(1)
+    );
+
+// Sliding window: 1000 requests per minute
+RateLimiter rateLimiter = new RateLimiter(
+    RateLimiter.Strategy.SLIDING_WINDOW,
+    1000,
+    Duration.ofMinutes(1)
+);
+
+// Fixed window: 10000 requests per hour
+RateLimiter rateLimiter = new RateLimiter(
+    RateLimiter.Strategy.FIXED_WINDOW,
+    10000,
+    Duration.ofHours(1)
+);
+```
+
+### Circuit Breaker
+
+Configure circuit breaker for fault tolerance:
+
+```java
+// Default: 5 failures, 30s timeout, 60s reset
+CircuitBreaker breaker = new CircuitBreaker();
+
+// Custom configuration
+CircuitBreaker breaker = new CircuitBreaker(
+    10,                          // failure threshold
+    Duration.ofSeconds(60),      // timeout before half-open
+    Duration.ofMinutes(5),       // reset timeout
+    5                            // half-open requests
+);
+
+// Wrap requests
+try{
+    breaker.
+
+execute("http://backend:8080",() ->{
+    // Your backend call
+    return result;
+    });
+        }catch(
+CircuitOpenException e){
+    // Circuit is open, fail fast
+    }
+```
+
+### WebSocket Proxying
+
+WebSocket connections are automatically detected and proxied:
+
+```json
+{
+  "routes": {
+    "/ws": [
+      "http://localhost:8080"
+    ]
+  }
+}
+```
+
+The server detects `Upgrade: websocket` headers and transparently proxies the connection.
+
+### Compression
+
+Compression is automatic based on `Accept-Encoding` header:
+
+- **Brotli** (best compression): `br`
+- **Gzip** (widely supported): `gzip`
+- **Deflate**: `deflate`
+
+Only text-based content > 1KB is compressed.
+
+### Admin API
+
+Access runtime management endpoints:
+
+```bash
+# Server health
+curl http://localhost:8080/admin/health
+
+# Prometheus metrics
+curl http://localhost:8080/admin/metrics
+
+# Server statistics
+curl http://localhost:8080/admin/stats
+
+# Reload routes
+curl -X POST http://localhost:8080/admin/routes/reload
+
+# Circuit breaker status
+curl http://localhost:8080/admin/circuits
+
+# Reset circuit breaker
+curl -X POST "http://localhost:8080/admin/circuits/reset?backend=http://backend:8080"
+
+# Rate limiter status
+curl http://localhost:8080/admin/ratelimit
+```
+
 ### Health Check Configuration
 
 Health checks run automatically with these defaults:
@@ -278,25 +423,15 @@ Health checks run automatically with these defaults:
 - **Failure Threshold**: 3 consecutive failures → unhealthy
 - **Success Threshold**: 2 consecutive successes → healthy
 
-## 🔒 Security Features
+## 🔒 Security Best Practices
 
-### TLS/HTTPS Support
-
-Enable HTTPS by providing a keystore:
-
-```java
-SslWrapper ssl = new SslWrapper("keystore.p12", "password");
-// Integrate with ServerLoop for HTTPS support
-```
-
-### Header Forwarding
-
-The proxy automatically adds:
-
-- `X-Forwarded-For`: Client IP address
-- `X-Real-IP`: Client IP address
-- `X-Forwarded-Proto`: Protocol (http/https)
-- `Host`: Backend hostname
+1. **Use Strong Certificates**: Generate proper SSL certificates with Let's Encrypt
+2. **Enable Rate Limiting**: Protect against DoS attacks
+3. **Configure Circuit Breakers**: Prevent cascade failures
+4. **Secure Admin API**: Add authentication in production
+5. **Monitor Metrics**: Watch for anomalies in traffic patterns
+6. **Regular Updates**: Keep dependencies up to date
+7. **Network Isolation**: Run backends in isolated networks
 
 ## 📜 License
 
@@ -329,15 +464,16 @@ Check backend logs and ensure they respond to HEAD requests on `/`. Adjust firew
 - [x] Advanced load balancing
 - [x] Metrics endpoint
 - [x] Access logging
-- [x] TLS support (basic)
-- [ ] HTTP/2 support with ALPN
-- [ ] Automatic HTTPS with Let's Encrypt (ACME)
-- [ ] WebSocket proxying
-- [ ] Brotli compression
+- [x] TLS/HTTPS support
+- [x] HTTP/2 support with ALPN
+- [x] WebSocket proxying
+- [x] Brotli/gzip compression
+- [x] Rate limiting (token bucket, sliding window, fixed window)
+- [x] Circuit breaker patterns
+- [x] Admin API for runtime configuration
+- [ ] Automatic HTTPS with Let's Encrypt (ACME) - Partial implementation
 - [ ] Request/Response buffering options
-- [ ] Rate limiting
-- [ ] Circuit breaker patterns
-- [ ] Admin API for runtime configuration
+- [ ] Advanced caching strategies
 
 ## 🤝 Contributing
 
