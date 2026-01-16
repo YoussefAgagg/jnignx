@@ -72,7 +72,7 @@ public final class NanoServer {
    *
    * @param args command line arguments
    */
-  static void main(String[] args) {
+  public static void main(String[] args) {
     int port = DEFAULT_PORT;
     String configFile = DEFAULT_CONFIG;
 
