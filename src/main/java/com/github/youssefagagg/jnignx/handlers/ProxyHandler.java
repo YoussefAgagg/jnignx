@@ -8,6 +8,8 @@ import java.net.InetSocketAddress;
 import java.net.URI;
 import java.nio.ByteBuffer;
 import java.nio.channels.SocketChannel;
+import java.nio.charset.StandardCharsets;
+import java.util.Map;
 
 /**
  * Handles reverse proxying to backend servers.
@@ -42,18 +44,32 @@ public class ProxyHandler {
     try (SocketChannel backendChannel = SocketChannel.open()) {
       backendChannel.connect(new InetSocketAddress(host, port));
 
-      // Forward initial data (Headers + part of Body)
+      // 1. Send modified headers (Connection: close)
+      byte[] newHeaders = reconstructHeadersWithClose(request);
+      ByteBuffer headersBuf = ByteBuffer.wrap(newHeaders);
+      while (headersBuf.hasRemaining()) {
+        backendChannel.write(headersBuf);
+      }
+
+      // 2. Forward remaining body from initialData (skip original headers)
       initialData.rewind();
-      initialData.limit(initialBytes);
-      while (initialData.hasRemaining()) {
-        backendChannel.write(initialData);
+      if (initialBytes > request.headerLength()) {
+        initialData.position(request.headerLength());
+        initialData.limit(initialBytes);
+        while (initialData.hasRemaining()) {
+          backendChannel.write(initialData);
+        }
       }
 
       // Calculate remaining body to read from Client
       long bodyBytesRead = initialBytes - request.headerLength();
+      if (bodyBytesRead < 0) {
+        bodyBytesRead = 0; // Just in case
+      }
+      
       long bodyBytesRemaining = request.bodyLength() - bodyBytesRead;
       if (bodyBytesRemaining < 0) {
-        bodyBytesRemaining = 0; // Should not happen if parser is correct
+        bodyBytesRemaining = 0;
       }
 
       // Start thread for Backend -> Client (Response)
@@ -77,6 +93,22 @@ public class ProxyHandler {
         Thread.currentThread().interrupt();
       }
     }
+  }
+
+  private byte[] reconstructHeadersWithClose(Request request) {
+    StringBuilder sb = new StringBuilder();
+    sb.append(request.method()).append(" ")
+      .append(request.path()).append(" ")
+      .append(request.version()).append("\r\n");
+
+    for (Map.Entry<String, String> entry : request.headers().entrySet()) {
+      if (!entry.getKey().equalsIgnoreCase("Connection")) {
+        sb.append(entry.getKey()).append(": ").append(entry.getValue()).append("\r\n");
+      }
+    }
+    sb.append("Connection: close\r\n");
+    sb.append("\r\n");
+    return sb.toString().getBytes(StandardCharsets.UTF_8);
   }
 
   // Transfer until EOF
