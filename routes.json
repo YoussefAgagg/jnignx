@@ -1,8 +1,7 @@
 {
   "routes": {
-    "/api": [
-      "http://localhost:3000",
-      "http://localhost:3001"
+    "/assets": [
+      "file:///Users/youssefagagg/IdeaProjects/jnignx"
     ],
     "/static": [
       "http://localhost:8081"

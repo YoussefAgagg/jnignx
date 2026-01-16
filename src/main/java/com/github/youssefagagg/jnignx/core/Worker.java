@@ -66,7 +66,7 @@ public class Worker implements Runnable {
     String backend = router.resolveBackend(request.path());
     if (backend != null) {
       if (backend.startsWith("file://")) {
-        new StaticHandler().handle(clientChannel, backend, request.path());
+        new StaticHandler().handle(clientChannel, backend, request);
       } else {
         new ProxyHandler().handle(clientChannel, backend, buffer, totalBytesRead, request, arena);
       }
