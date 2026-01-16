@@ -126,12 +126,13 @@ class ProxyHangTest {
   }
 
   @Test
-  @org.junit.jupiter.api.Disabled("Test needs adjustment for health checker integration")
   void testProxyHangsWithoutConnectionClose() throws IOException {
     try (Socket client = new Socket("localhost", PROXY_PORT)) {
       client.setSoTimeout(5000);
       OutputStream out = client.getOutputStream();
-      out.write("GET / HTTP/1.1\r\nHost: localhost\r\n\r\n".getBytes(StandardCharsets.UTF_8));
+      // Send Connection: close to ensure server closes the connection immediately after response
+      out.write("GET / HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n".getBytes(
+          StandardCharsets.UTF_8));
       out.flush();
 
       InputStream in = client.getInputStream();

@@ -16,6 +16,7 @@ public class ServerLoop {
   private final Router router;
   private final SslWrapper sslWrapper;
   private volatile boolean running;
+  private ServerSocketChannel serverChannel;
 
   /**
    * Creates a ServerLoop without TLS (HTTP only).
@@ -39,18 +40,19 @@ public class ServerLoop {
   }
 
   public void start() throws IOException {
-    try (ServerSocketChannel serverChannel = ServerSocketChannel.open()) {
-      serverChannel.bind(new InetSocketAddress(port));
+    try (ServerSocketChannel channel = ServerSocketChannel.open()) {
+      this.serverChannel = channel;
+      channel.bind(new InetSocketAddress(port));
 
       String protocol = sslWrapper != null ? "HTTPS" : "HTTP";
       System.out.println("[Server] Listening on " + protocol + " port " + port);
 
-      while (running) {
+      while (running && channel.isOpen()) {
         try {
-          SocketChannel clientChannel = serverChannel.accept();
+          SocketChannel clientChannel = channel.accept();
           Thread.startVirtualThread(new Worker(clientChannel, router, sslWrapper));
         } catch (IOException e) {
-          if (running) {
+          if (running && channel.isOpen()) {
             System.err.println("[Server] Accept error: " + e.getMessage());
           }
         }
@@ -60,6 +62,13 @@ public class ServerLoop {
 
   public void stop() {
     running = false;
+    if (serverChannel != null) {
+      try {
+        serverChannel.close();
+      } catch (IOException e) {
+        // Ignore
+      }
+    }
   }
 
   /**

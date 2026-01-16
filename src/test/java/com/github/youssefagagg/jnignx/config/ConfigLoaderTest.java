@@ -42,7 +42,7 @@ class ConfigLoaderTest {
             "/api": ["http://backend1:8080", "http://backend2:8080"]
           },
           "loadBalancer": "ROUND_ROBIN",
-          "rateLimit": {
+          "rateLimiter": {
             "enabled": true,
             "requestsPerSecond": 100,
             "burstSize": 20

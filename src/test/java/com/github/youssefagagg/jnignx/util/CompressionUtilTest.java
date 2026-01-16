@@ -17,7 +17,7 @@ class CompressionUtilTest {
 
   @Test
   void testGzipCompressionAndDecompression() throws IOException {
-    String original = "Hello, World! This is a test string for compression.";
+    String original = "Hello, World! This is a test string for compression.".repeat(20);
     byte[] originalBytes = original.getBytes(StandardCharsets.UTF_8);
 
     // Compress

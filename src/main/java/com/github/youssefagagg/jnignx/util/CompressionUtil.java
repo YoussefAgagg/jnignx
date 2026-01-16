@@ -70,14 +70,16 @@ public final class CompressionUtil {
       return false;
     }
 
+    String lowerType = contentType.toLowerCase();
+
     // Compress text-based content
-    return contentType.startsWith("text/") ||
-        contentType.contains("javascript") ||
-        contentType.contains("json") ||
-        contentType.contains("xml") ||
-        contentType.contains("css") ||
-        contentType.contains("html") ||
-        contentType.contains("svg");
+    return lowerType.startsWith("text/") ||
+        lowerType.contains("javascript") ||
+        lowerType.contains("json") ||
+        lowerType.contains("xml") ||
+        lowerType.contains("css") ||
+        lowerType.contains("html") ||
+        lowerType.contains("svg");
   }
 
   /**

@@ -32,8 +32,8 @@ import org.junit.jupiter.api.io.TempDir;
  */
 class IntegrationTest {
 
-  private static final int PROXY_PORT = 19991;
-  private static final int BACKEND_PORT = 18881;
+  private int proxyPort;
+  private int backendPort;
   @TempDir
   Path tempDir;
   private Thread backendThread;
@@ -43,6 +43,9 @@ class IntegrationTest {
 
   @BeforeEach
   void setup() throws Exception {
+    proxyPort = getFreePort();
+    backendPort = getFreePort();
+    
     // Start mock backend server
     startBackendServer();
 
@@ -60,15 +63,21 @@ class IntegrationTest {
                                           "enabled": false
                                         }
                                       }
-                                      """, PROXY_PORT, BACKEND_PORT, BACKEND_PORT);
+                                      """, proxyPort, backendPort, backendPort);
     Files.writeString(configFile, config);
 
     // Start proxy server
     startProxyServer(configFile);
 
     // Wait for servers to be ready
-    assertTrue(waitForServer(BACKEND_PORT, 5000), "Backend server failed to start");
-    assertTrue(waitForServer(PROXY_PORT, 5000), "Proxy server failed to start");
+    assertTrue(waitForServer(backendPort, 5000), "Backend server failed to start");
+    assertTrue(waitForServer(proxyPort, 5000), "Proxy server failed to start");
+  }
+
+  private int getFreePort() throws IOException {
+    try (ServerSocket socket = new ServerSocket(0)) {
+      return socket.getLocalPort();
+    }
   }
 
   @AfterEach
@@ -85,7 +94,7 @@ class IntegrationTest {
 
   @Test
   void testBasicProxyRequest() throws Exception {
-    String response = sendGetRequest("http://localhost:" + PROXY_PORT + "/test");
+    String response = sendGetRequest("http://localhost:" + proxyPort + "/test");
 
     assertNotNull(response);
     assertTrue(response.contains("HTTP/1.1 200") || response.contains("Hello from backend"));
@@ -94,14 +103,14 @@ class IntegrationTest {
   @Test
   void testMultipleRequests() throws Exception {
     for (int i = 0; i < 10; i++) {
-      String response = sendGetRequest("http://localhost:" + PROXY_PORT + "/test");
+      String response = sendGetRequest("http://localhost:" + proxyPort + "/test");
       assertNotNull(response, "Request " + i + " failed");
     }
   }
 
   @Test
   void testPostRequest() throws Exception {
-    String response = sendPostRequest("http://localhost:" + PROXY_PORT + "/api/data",
+    String response = sendPostRequest("http://localhost:" + proxyPort + "/api/data",
                                       "{\"key\":\"value\"}");
 
     assertNotNull(response);
@@ -109,7 +118,7 @@ class IntegrationTest {
 
   @Test
   void testLargeResponse() throws Exception {
-    String response = sendGetRequest("http://localhost:" + PROXY_PORT + "/large");
+    String response = sendGetRequest("http://localhost:" + proxyPort + "/large");
     assertNotNull(response);
   }
 
@@ -123,7 +132,7 @@ class IntegrationTest {
       final int threadId = i;
       threads[i] = new Thread(() -> {
         try {
-          String response = sendGetRequest("http://localhost:" + PROXY_PORT + "/test");
+          String response = sendGetRequest("http://localhost:" + proxyPort + "/test");
           assertNotNull(response, "Thread " + threadId + " got null response");
         } catch (Exception e) {
           fail("Thread " + threadId + " failed: " + e.getMessage());
@@ -139,7 +148,7 @@ class IntegrationTest {
 
   @Test
   void testHealthEndpoint() throws Exception {
-    String response = sendGetRequest("http://localhost:" + PROXY_PORT + "/health");
+    String response = sendGetRequest("http://localhost:" + proxyPort + "/health");
     assertNotNull(response);
     assertTrue(response.contains("200") || response.contains("ok"));
   }
@@ -147,15 +156,15 @@ class IntegrationTest {
   @Test
   void testMetricsEndpoint() throws Exception {
     // Generate some traffic first
-    sendGetRequest("http://localhost:" + PROXY_PORT + "/test");
+    sendGetRequest("http://localhost:" + proxyPort + "/test");
 
-    String response = sendGetRequest("http://localhost:" + PROXY_PORT + "/metrics");
+    String response = sendGetRequest("http://localhost:" + proxyPort + "/metrics");
     assertNotNull(response);
   }
 
   @Test
   void testInvalidPath() throws Exception {
-    String response = sendGetRequest("http://localhost:" + PROXY_PORT + "/nonexistent");
+    String response = sendGetRequest("http://localhost:" + proxyPort + "/nonexistent");
     assertNotNull(response);
     // Backend will handle or return error
   }
@@ -163,7 +172,7 @@ class IntegrationTest {
   @Test
   void testConnectionPersistence() throws Exception {
     // Test multiple requests on same connection
-    try (Socket socket = new Socket("localhost", PROXY_PORT)) {
+    try (Socket socket = new Socket("localhost", proxyPort)) {
       PrintWriter out = new PrintWriter(socket.getOutputStream(), true);
       BufferedReader in = new BufferedReader(new InputStreamReader(socket.getInputStream()));
 
@@ -200,7 +209,7 @@ class IntegrationTest {
 
   private void startBackendServer() {
     backendThread = new Thread(() -> {
-      try (ServerSocket serverSocket = new ServerSocket(BACKEND_PORT)) {
+      try (ServerSocket serverSocket = new ServerSocket(backendPort)) {
         serverSocket.setSoTimeout(1000);
 
         while (backendRunning) {
@@ -256,7 +265,7 @@ class IntegrationTest {
   private void startProxyServer(Path configFile) {
     proxyThread = new Thread(() -> {
       try {
-        NanoServer.main(new String[] {configFile.toString()});
+        NanoServer.main(new String[] {String.valueOf(proxyPort), configFile.toString()});
       } catch (Exception e) {
         if (backendRunning) {
           e.printStackTrace();

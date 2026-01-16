@@ -53,7 +53,7 @@ public final class AdminAuth {
   private final Map<String, String> salts = new ConcurrentHashMap<>(); // username -> salt
   private final Map<String, Boolean> ipWhitelist = new ConcurrentHashMap<>();
   private String apiKey;
-  private boolean enabled = true;
+  private boolean enabled = false;
 
   /**
    * Creates a new AdminAuth instance with authentication disabled by default.

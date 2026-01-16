@@ -164,8 +164,13 @@ public final class RateLimiter {
 
     TokenBucket(int capacity, Duration window) {
       this.capacity = capacity;
-      this.refillIntervalNanos = window.toNanos() / capacity;
-      this.tokens = new AtomicInteger(capacity);
+      if (capacity > 0) {
+        this.refillIntervalNanos = window.toNanos() / capacity;
+        this.tokens = new AtomicInteger(capacity);
+      } else {
+        this.refillIntervalNanos = Long.MAX_VALUE;
+        this.tokens = new AtomicInteger(0);
+      }
       this.lastRefillTime = System.nanoTime();
     }
 

@@ -83,10 +83,8 @@ public final class CircuitBreaker {
    * @param backend the backend URL
    */
   public void recordSuccess(String backend) {
-    BackendCircuit circuit = circuits.get(backend);
-    if (circuit != null) {
-      circuit.recordSuccess();
-    }
+    BackendCircuit circuit = circuits.computeIfAbsent(backend, k -> new BackendCircuit());
+    circuit.recordSuccess();
   }
 
   /**
@@ -95,10 +93,8 @@ public final class CircuitBreaker {
    * @param backend the backend URL
    */
   public void recordFailure(String backend) {
-    BackendCircuit circuit = circuits.get(backend);
-    if (circuit != null) {
-      circuit.recordFailure();
-    }
+    BackendCircuit circuit = circuits.computeIfAbsent(backend, k -> new BackendCircuit());
+    circuit.recordFailure();
   }
 
   /**

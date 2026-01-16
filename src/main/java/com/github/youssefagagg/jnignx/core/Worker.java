@@ -103,10 +103,9 @@ public class Worker implements Runnable {
   @Override
   public void run() {
     metrics.incrementActiveConnections();
-    long startTime = System.currentTimeMillis();
 
     try (Arena arena = Arena.ofConfined()) {
-      handleConnection(arena, startTime);
+      handleConnection(arena);
     } catch (Exception e) {
       AccessLogger.logError("Error handling connection", e.getMessage());
     } finally {
@@ -115,7 +114,7 @@ public class Worker implements Runnable {
     }
   }
 
-  private void handleConnection(Arena arena, long startTime) throws IOException {
+  private void handleConnection(Arena arena) throws IOException {
     // Handle TLS handshake if HTTPS
     SslWrapper.SslSession sslSession = null;
     if (sslWrapper != null) {
@@ -132,149 +131,200 @@ public class Worker implements Runnable {
     MemorySegment bufferSegment = arena.allocate(8192);
     ByteBuffer buffer = bufferSegment.asByteBuffer();
 
-    int totalBytesRead = 0;
-    Request request = null;
+    // Set timeout for keep-alive
+    clientChannel.socket().setSoTimeout(30000); // 30 seconds
 
-    // Read request (with SSL if enabled)
-    while (buffer.hasRemaining()) {
-      int bytesRead;
-      if (sslSession != null) {
-        bytesRead = sslSession.read(buffer);
-      } else {
-        bytesRead = clientChannel.read(buffer);
-      }
+    while (clientChannel.isOpen()) {
+      long startTime = System.currentTimeMillis();
+      buffer.clear();
+      int totalBytesRead = 0;
+      Request request = null;
 
-      if (bytesRead == -1) {
-        break;
-      }
-      totalBytesRead = buffer.position();
-
-      // Try to parse
-      request = HttpParser.parse(bufferSegment, totalBytesRead);
-      if (request != null) {
-        break;
-      }
-    }
-
-    if (request == null) {
-      // Bad request or incomplete headers
-      return;
-    }
-
-    // Extract client IP
-    String clientIp = extractClientIp();
-    String userAgent = request.headers().getOrDefault("User-Agent", "");
-    String path = request.path();
-    String method = request.method();
-
-    // Get CORS and Auth config
-    CorsConfig corsConfig = serverConfig.corsConfig();
-    AdminAuth adminAuth = serverConfig.adminAuth();
-    String origin = request.headers().get("Origin");
-
-    // Handle CORS preflight requests
-    if (corsConfig.isEnabled() && "OPTIONS".equalsIgnoreCase(method)) {
-      String requestMethod = request.headers().get("Access-Control-Request-Method");
-      if (CorsConfig.isPreflight(method, origin, requestMethod)) {
-        sendCorsPreflightResponse(clientChannel, sslSession, corsConfig, origin, requestMethod,
-                                  request.headers().get("Access-Control-Request-Headers"));
-        long duration = System.currentTimeMillis() - startTime;
-        AccessLogger.logAccess(clientIp, method, path, 204, duration, 0, userAgent,
-                               "cors-preflight");
-        metrics.recordRequest(204, duration, path, totalBytesRead, 0);
-        return;
-      }
-    }
-
-    // Apply rate limiting (only if enabled in config)
-    if (serverConfig.rateLimiterEnabled() && !rateLimiter.allowRequest(clientIp, path)) {
-      sendRateLimitResponse(clientChannel, sslSession, corsConfig, origin, method);
-      long duration = System.currentTimeMillis() - startTime;
-      AccessLogger.logAccess(clientIp, method, path, 429, duration, 0, userAgent, "rate-limited");
-      metrics.recordRequest(429, duration, path, totalBytesRead, 0);
-      return;
-    }
-
-    // Check for admin API
-    if (AdminHandler.isAdminRequest(path)) {
-      // Check admin authentication
-      if (adminAuth.isEnabled()) {
-        String authHeader = request.headers().get("Authorization");
-        if (!adminAuth.authenticate(authHeader, clientIp)) {
-          sendUnauthorizedResponse(clientChannel, sslSession, adminAuth, corsConfig, origin,
-                                   method);
-          long duration = System.currentTimeMillis() - startTime;
-          AccessLogger.logAccess(clientIp, method, path, 401, duration, 0, userAgent,
-                                 "auth-failed");
-          metrics.recordRequest(401, duration, path, totalBytesRead, 0);
-          return;
-        }
-      }
-
-      adminHandler.handle(clientChannel, request);
-      long duration = System.currentTimeMillis() - startTime;
-      AccessLogger.logAccess(clientIp, method, path, 200, duration, 0, userAgent, "admin");
-      metrics.recordRequest(200, duration, path, totalBytesRead, 0);
-      return;
-    }
-
-    // Check for metrics endpoint
-    if ("/metrics".equals(path)) {
-      serveMetrics(clientChannel, sslSession);
-      long duration = System.currentTimeMillis() - startTime;
-      AccessLogger.logAccess(clientIp, method, path, 200, duration, 0, userAgent, "internal");
-      metrics.recordRequest(200, duration, path, totalBytesRead, 0);
-      return;
-    }
-
-    // Route request
-    String backend = router.resolveBackend(path, clientIp);
-    int status = 200;
-    long bytesSent = 0;
-
-    if (backend != null) {
-      // Check circuit breaker
-      if (!circuitBreaker.allowRequest(backend)) {
-        sendServiceUnavailable(clientChannel, sslSession);
-        long duration = System.currentTimeMillis() - startTime;
-        AccessLogger.logAccess(clientIp, method, path, 503, duration, 0, userAgent, "circuit-open");
-        metrics.recordRequest(503, duration, path, totalBytesRead, 0);
-        return;
-      }
-
-      router.recordConnectionStart(backend);
+      // Read request (with SSL if enabled)
       try {
-        // Check for WebSocket upgrade
-        if (WebSocketHandler.isWebSocketUpgrade(request)) {
-          WebSocketHandler.handleWebSocket(clientChannel, request, backend);
-          circuitBreaker.recordSuccess(backend);
-        } else if (backend.startsWith("file://")) {
-          new StaticHandler().handle(clientChannel, backend, request);
-          circuitBreaker.recordSuccess(backend);
-        } else {
-          new ProxyHandler().handle(clientChannel, backend, buffer, totalBytesRead, request, arena);
-          circuitBreaker.recordSuccess(backend);
-        }
-        router.recordProxySuccess(backend);
-      } catch (Exception e) {
-        router.recordProxyFailure(backend, e.getMessage());
-        circuitBreaker.recordFailure(backend);
-        status = 502; // Bad Gateway
-        AccessLogger.logError("Proxy error", e.getMessage());
-      } finally {
-        router.recordConnectionEnd(backend);
-      }
-    } else {
-      // 404 Not Found
-      new StaticHandler().handle404(clientChannel);
-      status = 404;
-    }
+        while (buffer.hasRemaining()) {
+          int bytesRead;
+          if (sslSession != null) {
+            bytesRead = sslSession.read(buffer);
+          } else {
+            bytesRead = clientChannel.read(buffer);
+          }
 
-    // Log access and record metrics
-    long duration = System.currentTimeMillis() - startTime;
-    AccessLogger.logAccess(clientIp, method, path, status, duration, bytesSent, userAgent,
-                           backend != null ? backend : "none");
-    metrics.recordRequest(status, duration, path, totalBytesRead, bytesSent);
+          if (bytesRead == -1) {
+            return; // EOF
+          }
+          if (bytesRead == 0) {
+            // Should not happen with blocking channel unless timeout?
+            continue;
+          }
+          totalBytesRead = buffer.position();
+
+          // Try to parse
+          request = HttpParser.parse(bufferSegment, totalBytesRead);
+          if (request != null) {
+            break;
+          }
+        }
+      } catch (IOException e) {
+        // Timeout or other error
+        break;
+      }
+
+      if (request == null) {
+        // Bad request or incomplete headers
+        break;
+      }
+
+      // Extract client IP
+      String clientIp = extractClientIp();
+      String userAgent = request.headers().getOrDefault("User-Agent", "");
+      String path = request.path();
+      String method = request.method();
+
+      // Get CORS and Auth config
+      CorsConfig corsConfig = serverConfig.corsConfig();
+      AdminAuth adminAuth = serverConfig.adminAuth();
+      String origin = request.headers().get("Origin");
+
+      boolean keepAlive = !"close".equalsIgnoreCase(request.headers().get("Connection"));
+
+      // Handle CORS preflight requests
+      if (corsConfig.isEnabled() && "OPTIONS".equalsIgnoreCase(method)) {
+        String requestMethod = request.headers().get("Access-Control-Request-Method");
+        if (CorsConfig.isPreflight(method, origin, requestMethod)) {
+          sendCorsPreflightResponse(clientChannel, sslSession, corsConfig, origin, requestMethod,
+                                    request.headers().get("Access-Control-Request-Headers"));
+          long duration = System.currentTimeMillis() - startTime;
+          AccessLogger.logAccess(clientIp, method, path, 204, duration, 0, userAgent,
+                                 "cors-preflight");
+          metrics.recordRequest(204, duration, path, totalBytesRead, 0);
+          if (!keepAlive) {
+            break;
+          }
+          continue;
+        }
+      }
+
+      // Apply rate limiting (only if enabled in config)
+      if (serverConfig.rateLimiterEnabled() && !rateLimiter.allowRequest(clientIp, path)) {
+        sendRateLimitResponse(clientChannel, sslSession, corsConfig, origin, method);
+        long duration = System.currentTimeMillis() - startTime;
+        AccessLogger.logAccess(clientIp, method, path, 429, duration, 0, userAgent, "rate-limited");
+        metrics.recordRequest(429, duration, path, totalBytesRead, 0);
+        // Usually rate limit response should close connection or be handled
+        break;
+      }
+
+      // Check for admin API
+      if (AdminHandler.isAdminRequest(path)) {
+        // Check admin authentication
+        if (adminAuth.isEnabled()) {
+          String authHeader = request.headers().get("Authorization");
+          if (!adminAuth.authenticate(authHeader, clientIp)) {
+            sendUnauthorizedResponse(clientChannel, sslSession, adminAuth, corsConfig, origin,
+                                     method);
+            long duration = System.currentTimeMillis() - startTime;
+            AccessLogger.logAccess(clientIp, method, path, 401, duration, 0, userAgent,
+                                   "auth-failed");
+            metrics.recordRequest(401, duration, path, totalBytesRead, 0);
+            break;
+          }
+        }
+
+        adminHandler.handle(clientChannel, request);
+        long duration = System.currentTimeMillis() - startTime;
+        AccessLogger.logAccess(clientIp, method, path, 200, duration, 0, userAgent, "admin");
+        metrics.recordRequest(200, duration, path, totalBytesRead, 0);
+        if (!keepAlive) {
+          break;
+        }
+        continue;
+      }
+
+      // Check for metrics endpoint
+      if ("/metrics".equals(path)) {
+        serveMetrics(clientChannel, sslSession);
+        long duration = System.currentTimeMillis() - startTime;
+        AccessLogger.logAccess(clientIp, method, path, 200, duration, 0, userAgent, "internal");
+        metrics.recordRequest(200, duration, path, totalBytesRead, 0);
+        if (!keepAlive) {
+          break;
+        }
+        continue;
+      }
+
+      // Check for health endpoint
+      if ("/health".equals(path)) {
+        serveHealth(clientChannel, sslSession);
+        long duration = System.currentTimeMillis() - startTime;
+        AccessLogger.logAccess(clientIp, method, path, 200, duration, 0, userAgent, "internal");
+        metrics.recordRequest(200, duration, path, totalBytesRead, 0);
+        if (!keepAlive) {
+          break;
+        }
+        continue;
+      }
+
+      // Route request
+      String backend = router.resolveBackend(path, clientIp);
+      int status = 200;
+      long bytesSent = 0;
+
+      if (backend != null) {
+        // Check circuit breaker
+        if (!circuitBreaker.allowRequest(backend)) {
+          sendServiceUnavailable(clientChannel, sslSession);
+          long duration = System.currentTimeMillis() - startTime;
+          AccessLogger.logAccess(clientIp, method, path, 503, duration, 0, userAgent,
+                                 "circuit-open");
+          metrics.recordRequest(503, duration, path, totalBytesRead, 0);
+          break;
+        }
+
+        router.recordConnectionStart(backend);
+        try {
+          // Check for WebSocket upgrade
+          if (WebSocketHandler.isWebSocketUpgrade(request)) {
+            WebSocketHandler.handleWebSocket(clientChannel, request, backend);
+            circuitBreaker.recordSuccess(backend);
+            // WebSocket takes over connection, so we break loop
+            break;
+          } else if (backend.startsWith("file://")) {
+            new StaticHandler().handle(clientChannel, backend, request);
+            circuitBreaker.recordSuccess(backend);
+          } else {
+            new ProxyHandler().handle(clientChannel, backend, buffer, totalBytesRead, request,
+                                      arena);
+            circuitBreaker.recordSuccess(backend);
+          }
+          router.recordProxySuccess(backend);
+        } catch (Exception e) {
+          router.recordProxyFailure(backend, e.getMessage());
+          circuitBreaker.recordFailure(backend);
+          status = 502; // Bad Gateway
+          AccessLogger.logError("Proxy error", e.getMessage());
+          // If proxy error, we probably want to close connection or send error response
+          // For now, let's break
+          break;
+        } finally {
+          router.recordConnectionEnd(backend);
+        }
+      } else {
+        // 404 Not Found
+        new StaticHandler().handle404(clientChannel);
+        status = 404;
+      }
+
+      // Log access and record metrics
+      long duration = System.currentTimeMillis() - startTime;
+      AccessLogger.logAccess(clientIp, method, path, status, duration, bytesSent, userAgent,
+                             backend != null ? backend : "none");
+      metrics.recordRequest(status, duration, path, totalBytesRead, bytesSent);
+
+      if (!keepAlive) {
+        break;
+      }
+    }
 
     // Close SSL session if present
     if (sslSession != null) {
@@ -291,6 +341,25 @@ public class Worker implements Runnable {
       return clientChannel.getRemoteAddress().toString().split(":")[0].replace("/", "");
     } catch (IOException e) {
       return "unknown";
+    }
+  }
+
+  private void serveHealth(SocketChannel clientChannel, SslWrapper.SslSession sslSession)
+      throws IOException {
+    String response = "ok";
+    String httpResponse = "HTTP/1.1 200 OK\r\n" +
+        "Content-Type: text/plain\r\n" +
+        "Content-Length: " + response.length() + "\r\n" +
+        "\r\n" +
+        response;
+
+    ByteBuffer responseBuffer = ByteBuffer.wrap(httpResponse.getBytes(StandardCharsets.UTF_8));
+    if (sslSession != null) {
+      sslSession.write(responseBuffer);
+    } else {
+      while (responseBuffer.hasRemaining()) {
+        clientChannel.write(responseBuffer);
+      }
     }
   }
 

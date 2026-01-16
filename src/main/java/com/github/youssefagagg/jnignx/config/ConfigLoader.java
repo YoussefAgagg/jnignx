@@ -21,7 +21,7 @@ public final class ConfigLoader {
   private final String json;
   private int pos;
 
-  private ConfigLoader(String json) {
+  ConfigLoader(String json) {
     this.json = json;
     this.pos = 0;
   }
@@ -248,6 +248,9 @@ public final class ConfigLoader {
 
   private boolean getBoolean(Map<String, Object> map, String key, boolean defaultValue) {
     Object value = map.get(key);
+    if (value instanceof Boolean) {
+      return (Boolean) value;
+    }
     if (value instanceof String) {
       return Boolean.parseBoolean((String) value);
     }
@@ -256,6 +259,9 @@ public final class ConfigLoader {
 
   private int getInt(Map<String, Object> map, String key, int defaultValue) {
     Object value = map.get(key);
+    if (value instanceof Number) {
+      return ((Number) value).intValue();
+    }
     if (value instanceof String) {
       try {
         return Integer.parseInt((String) value);
@@ -265,7 +271,7 @@ public final class ConfigLoader {
     return defaultValue;
   }
 
-  private Map<String, Object> parseObject() {
+  Map<String, Object> parseObject() {
     skipWhitespace();
     expect('{');
     skipWhitespace();
@@ -294,11 +300,11 @@ public final class ConfigLoader {
     return obj;
   }
 
-  private List<String> parseArray() {
+  private List<Object> parseArray() {
     expect('[');
     skipWhitespace();
 
-    List<String> arr = new ArrayList<>();
+    List<Object> arr = new ArrayList<>();
 
     if (peek() != ']') {
       do {
@@ -307,7 +313,7 @@ public final class ConfigLoader {
           pos++;
           skipWhitespace();
         }
-        arr.add(parseString());
+        arr.add(parseValue());
         skipWhitespace();
       } while (peek() == ',');
     }
@@ -325,8 +331,54 @@ public final class ConfigLoader {
       return parseArray();
     } else if (c == '"') {
       return parseString();
+    } else if (c == 't' || c == 'f') {
+      return parseBoolean();
+    } else if (c == '-' || Character.isDigit(c)) {
+      return parseNumber();
     } else {
       throw new IllegalArgumentException("Unexpected character: " + c + " at position " + pos);
+    }
+  }
+
+  private boolean parseBoolean() {
+    char c = peek();
+    if (c == 't') {
+      consume("true");
+      return true;
+    } else {
+      consume("false");
+      return false;
+    }
+  }
+
+  private Number parseNumber() {
+    int start = pos;
+    if (peek() == '-') {
+      pos++;
+    }
+    while (pos < json.length() && Character.isDigit(json.charAt(pos))) {
+      pos++;
+    }
+    if (pos < json.length() && json.charAt(pos) == '.') {
+      pos++;
+      while (pos < json.length() && Character.isDigit(json.charAt(pos))) {
+        pos++;
+      }
+      return Double.parseDouble(json.substring(start, pos));
+    }
+    String numStr = json.substring(start, pos);
+    try {
+      return Integer.parseInt(numStr);
+    } catch (NumberFormatException e) {
+      return Long.parseLong(numStr);
+    }
+  }
+
+  private void consume(String text) {
+    if (json.startsWith(text, pos)) {
+      pos += text.length();
+    } else {
+      throw new IllegalArgumentException("Expected '" + text + "' at position " + pos);
     }
   }
 
