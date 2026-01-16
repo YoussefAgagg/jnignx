@@ -2,6 +2,7 @@ package com.github.youssefagagg.jnignx.core;
 
 import com.github.youssefagagg.jnignx.config.ConfigLoader;
 import com.github.youssefagagg.jnignx.config.RouteConfig;
+import com.github.youssefagagg.jnignx.config.ServerConfig;
 import java.io.IOException;
 import java.nio.file.Files;
 import java.nio.file.Path;
@@ -31,6 +32,7 @@ import java.util.concurrent.atomic.AtomicReference;
 public final class Router {
 
   private final AtomicReference<RouteConfig> configRef;
+  private final AtomicReference<ServerConfig> serverConfigRef;
   private final Path configPath;
   private final Map<String, AtomicInteger> roundRobinCounters;
   private final HealthChecker healthChecker;
@@ -56,11 +58,21 @@ public final class Router {
   public Router(Path configPath, LoadBalancer.Strategy lbStrategy) {
     this.configPath = configPath;
     this.configRef = new AtomicReference<>(RouteConfig.empty());
+    this.serverConfigRef = new AtomicReference<>(ServerConfig.builder().build());
     this.roundRobinCounters = new ConcurrentHashMap<>();
     this.healthChecker = new HealthChecker();
     this.loadBalancer = new LoadBalancer(lbStrategy, healthChecker);
     this.running = true;
     this.lastModified = null;
+  }
+
+  /**
+   * Gets the current server configuration.
+   *
+   * @return the current ServerConfig
+   */
+  public ServerConfig getServerConfig() {
+    return serverConfigRef.get();
   }
 
   /**
@@ -71,15 +83,36 @@ public final class Router {
    */
   public void loadConfig() throws IOException {
     if (Files.exists(configPath)) {
-      RouteConfig newConfig = ConfigLoader.load(configPath);
-      configRef.set(newConfig);
-      lastModified = Files.getLastModifiedTime(configPath);
-      System.out.println("[Router] Loaded configuration from " + configPath);
-      System.out.println("[Router] Routes: " + newConfig.routes().keySet());
+      // Try to load enhanced ServerConfig first
+      try {
+        ServerConfig serverConfig = ConfigLoader.loadServerConfig(configPath);
+        serverConfigRef.set(serverConfig);
+        configRef.set(serverConfig.toRouteConfig());
+        lastModified = Files.getLastModifiedTime(configPath);
+        System.out.println("[Router] Loaded enhanced configuration from " + configPath);
+        System.out.println("[Router] Routes: " + serverConfig.routes().keySet());
+        System.out.println("[Router] Rate Limiter: " +
+                               (serverConfig.rateLimiterEnabled() ? "enabled" : "disabled"));
+        System.out.println("[Router] Circuit Breaker: " +
+                               (serverConfig.circuitBreakerEnabled() ? "enabled" : "disabled"));
+        System.out.println(
+            "[Router] CORS: " + (serverConfig.corsConfig().isEnabled() ? "enabled" : "disabled"));
+        System.out.println("[Router] Admin Auth: " +
+                               (serverConfig.adminAuth().isEnabled() ? "enabled" : "disabled"));
+      } catch (Exception e) {
+        // Fallback to simple RouteConfig for backward compatibility
+        System.out.println(
+            "[Router] Enhanced config parse failed, using simple config: " + e.getMessage());
+        RouteConfig newConfig = ConfigLoader.load(configPath);
+        configRef.set(newConfig);
+        lastModified = Files.getLastModifiedTime(configPath);
+        System.out.println("[Router] Loaded simple configuration from " + configPath);
+        System.out.println("[Router] Routes: " + newConfig.routes().keySet());
+      }
 
       // Start health checking for all backends
       List<String> allBackends = new ArrayList<>();
-      for (List<String> backends : newConfig.routes().values()) {
+      for (List<String> backends : configRef.get().routes().values()) {
         for (String backend : backends) {
           if (!allBackends.contains(backend)) {
             allBackends.add(backend);
