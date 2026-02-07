@@ -54,7 +54,8 @@ public final class ServerConfig {
   // CORS
   private final CorsConfig corsConfig;
 
-  // Admin Authentication
+  // Admin API
+  private final boolean adminEnabled;
   private final AdminAuth adminAuth;
 
   // Timeouts
@@ -92,6 +93,7 @@ public final class ServerConfig {
     this.healthCheckExpectedStatusMax = builder.healthCheckExpectedStatusMax;
 
     this.corsConfig = builder.corsConfig;
+    this.adminEnabled = builder.adminEnabled;
     this.adminAuth = builder.adminAuth;
 
     this.connectionTimeout = builder.connectionTimeout;
@@ -185,6 +187,10 @@ public final class ServerConfig {
     return corsConfig;
   }
 
+  public boolean adminEnabled() {
+    return adminEnabled;
+  }
+
   public AdminAuth adminAuth() {
     return adminAuth;
   }
@@ -250,6 +256,7 @@ public final class ServerConfig {
     private int healthCheckExpectedStatusMax = 399;
 
     private CorsConfig corsConfig = CorsConfig.disabled();
+    private boolean adminEnabled = false;
     private AdminAuth adminAuth = new AdminAuth();
 
     private Duration connectionTimeout = Duration.ofSeconds(5);
@@ -315,6 +322,11 @@ public final class ServerConfig {
 
     public Builder cors(CorsConfig config) {
       this.corsConfig = config;
+      return this;
+    }
+
+    public Builder adminEnabled(boolean enabled) {
+      this.adminEnabled = enabled;
       return this;
     }
 

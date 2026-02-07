@@ -12,6 +12,10 @@
     ]
   },
   "loadBalancer": "round-robin",
+  "backendWeights": {
+    "http://localhost:3000": 3,
+    "http://localhost:3001": 1
+  },
   "rateLimiter": {
     "enabled": true,
     "requestsPerSecond": 1000,
@@ -25,10 +29,13 @@
   },
   "healthCheck": {
     "enabled": true,
-    "interval": 10,
-    "timeout": 5,
+    "intervalSeconds": 10,
+    "timeoutSeconds": 5,
     "failureThreshold": 3,
-    "successThreshold": 2
+    "successThreshold": 2,
+    "path": "/",
+    "expectedStatusMin": 200,
+    "expectedStatusMax": 399
   },
   "cors": {
     "enabled": true,
@@ -51,6 +58,7 @@
     "maxAge": 3600
   },
   "admin": {
+    "enabled": true,
     "authentication": {
       "apiKey": "${ADMIN_API_KEY}",
       "ipWhitelist": [

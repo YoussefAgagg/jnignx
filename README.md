@@ -16,23 +16,28 @@ Foreign Function & Memory API (Project Panama) for high concurrency and low-late
 
 ### Fully Implemented
 
-- **Reverse Proxy** — HTTP/1.1 request forwarding with `X-Forwarded-For`, `X-Real-IP`, `X-Forwarded-Proto` headers
+- **Reverse Proxy** — HTTP/1.1 request forwarding with `X-Forwarded-For`, `X-Real-IP`, `X-Forwarded-Proto` headers,
+  chunked transfer encoding, retry logic with alternate backends, and proper `502 Bad Gateway` error responses
 - **Virtual Threads** — one virtual thread per connection for massive concurrency
 - **Off-Heap Memory (FFM API)** — `Arena` / `MemorySegment` buffers to reduce GC pressure
-- **Load Balancing** — round-robin, least-connections, IP-hash (sticky sessions)
-- **Health Checking** — active (periodic HEAD probes) and passive (real-traffic failure tracking) with automatic
-  failover and recovery
+- **Load Balancing** — round-robin, weighted round-robin, least-connections, IP-hash (sticky sessions)
+- **Health Checking** — active (periodic HEAD probes with configurable path and expected status codes) and passive
+  (real-traffic failure tracking) with automatic failover and recovery
 - **TLS/HTTPS** — SSL termination via `SSLEngine` with TLS 1.2/1.3 and ALPN negotiation
 - **WebSocket Proxying** — upgrade detection, bidirectional frame-level relay
-- **Rate Limiting** — token-bucket, sliding-window, and fixed-window strategies
-- **Circuit Breaker** — per-backend failure tracking with open/half-open/closed states
-- **CORS** — configurable allowed origins, methods, headers, and preflight handling
-- **Static File Serving** — MIME detection, directory listings, path-traversal protection, gzip/deflate compression
-- **Admin API** — REST endpoints for health, metrics, routes, circuit-breaker and rate-limiter management, protected by
-  API-key/Basic-auth/IP-whitelist
-- **Prometheus Metrics** — `/metrics` endpoint with request counts, latency histograms, connection gauges, byte counters
-- **Structured Logging** — JSON access logs to stdout
-- **Hot-Reload** — file-watch on `routes.json` with atomic `AtomicReference` swap (zero-downtime)
+- **Rate Limiting** — token-bucket, sliding-window, and fixed-window strategies with `X-RateLimit-*` response headers
+- **Circuit Breaker** — per-backend failure tracking with open/half-open/closed states, shared across all worker
+  threads, with metrics and admin API integration
+- **CORS** — configurable allowed origins, methods, headers, preflight handling, and CORS headers on error responses
+- **Static File Serving** — MIME detection, directory listings, path-traversal protection, gzip/deflate compression,
+  HTTP Range requests (206), conditional requests (ETag/Last-Modified → 304), custom error pages
+- **Admin API** — REST endpoints for health, metrics, routes, circuit-breaker and rate-limiter management, backend
+  health status, config updates; protected by API-key/Basic-auth/IP-whitelist; **disabled by default**
+- **Prometheus Metrics** — `/metrics` endpoint with request counts, latency histograms, connection gauges, byte
+  counters, per-backend metrics, circuit breaker/rate limiter metrics, connection duration tracking
+- **Structured Logging** — JSON access logs to stdout with UUID-based request IDs for tracing
+- **Hot-Reload** — file-watch on `routes.json` with atomic `AtomicReference` swap (zero-downtime), validation before
+  swap
 - **GraalVM Native Image** — compatible (no runtime reflection)
 
 ### Partially Implemented / Stubbed
@@ -48,9 +53,9 @@ Foreign Function & Memory API (Project Panama) for high concurrency and low-late
 - HTTP/3 (QUIC)
 - Response caching (TTL, `Cache-Control`)
 - Request/response body transformation (middleware pipeline)
-- Range requests (partial content / byte serving)
 - Blue/green deployment patterns
-- Weighted load balancing
+- Per-route load balancing strategy
+- Per-route rate limits
 - Configuration DSL ("Nanofile")
 
 ---
@@ -104,6 +109,7 @@ See the [Quick Start Guide](docs/quickstart.md) for detailed setup instructions.
 |------------------------------------------------------|------------------------------------------------------------------|
 | [Quick Start Guide](docs/quickstart.md)              | Installation, first run, basic configuration                     |
 | [Configuration Reference](docs/configuration.md)     | All `routes.json` options explained                              |
+| [Proxy Setup Guide](docs/proxy-setup.md)             | Domain-based routing, multi-app proxy setup                      |
 | [Features Guide](docs/features.md)                   | Deep dive into each implemented feature and what can be improved |
 | [Architecture](docs/architecture.md)                 | Internal design, threading model, memory management              |
 | [Admin API Reference](docs/api.md)                   | REST endpoints for runtime management                            |
@@ -118,7 +124,7 @@ Contributions are welcome! Priority areas:
 1. Complete HTTP/2 support (HPACK decoding, stream multiplexing integration)
 2. Implement real ACME client for automatic HTTPS
 3. Add response caching
-4. Add chunked transfer encoding support
+4. Per-route load balancing and rate limiting
 5. Improve test coverage for edge cases
 
 ## License

@@ -174,10 +174,13 @@ public final class ConfigLoader {
       builder.cors(parseCorsConfig(corsObj, parser));
     }
 
-    // Parse admin authentication
+    // Parse admin configuration
     @SuppressWarnings("unchecked")
     Map<String, Object> adminObj = (Map<String, Object>) root.get("admin");
     if (adminObj != null) {
+      boolean adminEnabled = parser.getBoolean(adminObj, "enabled", false);
+      builder.adminEnabled(adminEnabled);
+
       @SuppressWarnings("unchecked")
       Map<String, Object> authObj = (Map<String, Object>) adminObj.get("authentication");
       if (authObj != null) {

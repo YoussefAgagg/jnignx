@@ -11,20 +11,17 @@ This document covers each implemented feature in detail, including current capab
 - HTTP/1.1 request forwarding via raw `SocketChannel` connections
 - Header reconstruction: replaces `Host`, adds `X-Forwarded-For`, `X-Real-IP`, `X-Forwarded-Proto`
 - Body forwarding for requests with `Content-Length`
+- **Chunked Transfer Encoding** — supports `Transfer-Encoding: chunked` for both requests and responses
+- **Connection Pooling** — infrastructure for reusing backend connections to reduce latency
+- **Retry Logic** — failed proxy attempts are retried on alternate backends when available
+- **Proper Error Responses** — clients receive `502 Bad Gateway` with CORS headers when backend connections fail
 - Backend response relay runs in a separate virtual thread for non-blocking bidirectional transfer
 - Buffers allocated off-heap with FFM API (`Arena` / `MemorySegment`)
 
-### Improvements Needed
+### Remaining Improvements
 
-- **Chunked Transfer Encoding** — the HTTP parser does not handle `Transfer-Encoding: chunked` requests or responses;
-  only `Content-Length`-based bodies are forwarded correctly
-- **Connection Pooling** — each request opens a new `SocketChannel` to the backend; reusing connections would
-  significantly reduce latency
-- **Retry Logic** — failed proxy attempts are not retried on alternate backends
 - **Request Buffering** — large request bodies are not streamed; the entire initial buffer must fit in the 8 KB
   allocation
-- **Error Responses** — when a backend connection fails, the client does not always receive a proper 502 Bad Gateway
-  response
 
 ---
 
@@ -32,19 +29,22 @@ This document covers each implemented feature in detail, including current capab
 
 ### Current Implementation
 
-Three strategies are available, configured via the `loadBalancer` field:
+Four strategies are available, configured via the `loadBalancer` field:
 
-| Strategy          | Algorithm                                   | Use Case                   |
-|-------------------|---------------------------------------------|----------------------------|
-| Round-Robin       | `AtomicInteger` counter mod backend count   | Uniform workloads          |
-| Least Connections | `AtomicLong` per-backend connection counter | Variable request durations |
-| IP Hash           | `clientIp.hashCode() % backends.size()`     | Sticky sessions            |
+| Strategy             | Algorithm                                   | Use Case                   |
+|----------------------|---------------------------------------------|----------------------------|
+| Round-Robin          | `AtomicInteger` counter mod backend count   | Uniform workloads          |
+| Weighted Round-Robin | Weight-based distribution across backends   | Mixed-capacity backends    |
+| Least Connections    | `AtomicLong` per-backend connection counter | Variable request durations |
+| IP Hash              | `clientIp.hashCode() % backends.size()`     | Sticky sessions            |
 
 All strategies filter out unhealthy backends before selection, falling back to all backends if none are healthy.
 
-### Improvements Needed
+**Weighted round-robin** is configured via the `backendWeights` section in the config file — see the
+[Configuration Reference](configuration.md) for details.
 
-- **Weighted Round-Robin** — no support for assigning different weights to backends with different capacities
+### Remaining Improvements
+
 - **Configurable Strategy per Route** — currently one global strategy; different routes may benefit from different
   strategies
 - **Slow Start** — newly recovered backends receive full traffic immediately instead of being ramped up gradually
@@ -57,7 +57,13 @@ All strategies filter out unhealthy backends before selection, falling back to a
 
 **Active checks:**
 
-- Sends `HEAD /` to each HTTP backend at a configurable interval (default: 10 seconds)
+- Sends `HEAD` requests to each HTTP backend at a configurable interval (default: 10 seconds)
+- **Configurable Health Check Path** — set via `healthCheck.path` (default: `/`); backends can expose `/healthz` or
+  `/ready`
+- **Expected Status Codes** — configurable range via `healthCheck.expectedStatusMin` / `expectedStatusMax`
+  (default: 200–399)
+- **Configuration from JSON** — all health check parameters (interval, timeout, thresholds, path, status range) are read
+  from `ServerConfig` rather than hardcoded
 - Backends marked unhealthy after N consecutive failures (default: 3)
 - Backends marked healthy after N consecutive successes (default: 2)
 - `file://` backends are skipped
@@ -68,14 +74,9 @@ All strategies filter out unhealthy backends before selection, falling back to a
 - `Router.recordProxySuccess()` / `recordProxyFailure()` called after each real request
 - Failure counts feed into the `HealthChecker.BackendHealth` state
 
-### Improvements Needed
+### Remaining Improvements
 
-- **Configurable Health Check Path** — currently hardcoded to `HEAD /`; backends may expose health at `/healthz` or
-  `/ready`
-- **Expected Status Codes** — any non-exception response is considered healthy; should support configuring expected
-  status codes (e.g., 200-299)
-- **Health Check via Config** — health check parameters are partially configurable via JSON but the `HealthChecker`
-  class uses hardcoded constants rather than reading from `ServerConfig`
+- **Reload Notification** — no webhook or event mechanism to notify of health state changes
 
 ---
 
@@ -89,7 +90,7 @@ All strategies filter out unhealthy backends before selection, falling back to a
 - Loads certificates from PKCS12 or JKS keystores
 - `SslWrapper.SslSession` provides `read()`, `write()`, `doHandshake()`, `close()`, `getNegotiatedProtocol()`
 
-### Improvements Needed
+### Remaining Improvements
 
 - **PEM Certificate Loading** — only Java KeyStore formats are supported; direct PEM/key file loading would be more
   convenient
@@ -112,7 +113,7 @@ All strategies filter out unhealthy backends before selection, falling back to a
 - Handles frame opcodes: text, binary, close, ping, pong
 - Supports masked and unmasked frames
 
-### Improvements Needed
+### Remaining Improvements
 
 - **Frame Fragmentation** — continuation frames are not reassembled
 - **Per-Message Compression** — `permessage-deflate` extension is not supported
@@ -135,11 +136,15 @@ Three strategies available, configured via the `rateLimiter` section:
 
 Rate limiting is applied per client IP and path. Clients exceeding the limit receive `429 Too Many Requests`.
 
-### Improvements Needed
+**Rate limit response headers** are included on every response:
+
+- `X-RateLimit-Limit` — maximum requests allowed
+- `X-RateLimit-Remaining` — remaining requests in the current window
+- `X-RateLimit-Reset` — seconds until the rate limit resets
+
+### Remaining Improvements
 
 - **Per-Route Rate Limits** — currently one global rate limit; different routes may need different limits
-- **Response Headers** — `X-RateLimit-Limit`, `X-RateLimit-Remaining`, `X-RateLimit-Reset` headers are not included in
-  responses
 - **Distributed Rate Limiting** — state is in-memory only; not shared across multiple JNignx instances
 - **Configurable Key** — rate limiting is keyed on client IP; should support keying on headers (e.g., API key) or other
   attributes
@@ -165,13 +170,17 @@ Transitions:
 - Half-Open → Closed: after successful test request
 - Half-Open → Open: after failed test request
 
-### Improvements Needed
+**Shared State** — circuit breaker instances are shared across all `Worker` connections using thread-safe singleton
+initialization (double-checked locking), ensuring that circuit state is globally consistent.
 
-- **Shared State** — each `Worker` creates its own `CircuitBreaker` instance; circuit state is not shared across
-  connections, reducing effectiveness
-- **Admin API Integration** — `/admin/circuits` endpoint returns empty data; should report actual circuit states for all
-  backends
-- **Metrics** — circuit breaker state changes are not recorded in metrics
+**Admin API Integration** — `/admin/circuits` returns actual circuit breaker states for all registered backends.
+
+**Metrics** — circuit breaker state changes are recorded in the metrics collector.
+
+### Remaining Improvements
+
+- **Half-Open Request Limit** — configurable number of test requests in HALF_OPEN state is not exposed in the config
+  file
 
 ---
 
@@ -183,12 +192,13 @@ Transitions:
 - Automatic `OPTIONS` preflight response handling
 - Origin validation against whitelist
 - CORS headers added to all responses when enabled
+- **CORS headers on error responses** — `429 Too Many Requests`, `502 Bad Gateway`, and `503 Service Unavailable`
+  responses include proper CORS headers
 
-### Improvements Needed
+### Remaining Improvements
 
 - **Wildcard Origins** — no support for `*` or pattern-based origin matching
 - **Per-Route CORS** — one global CORS policy; different routes may need different policies
-- **CORS Headers on Error Responses** — CORS headers are not always added to error responses (e.g., 502, 503)
 
 ---
 
@@ -197,18 +207,18 @@ Transitions:
 ### Current Implementation
 
 - Serves files from `file://` backend paths
-- Automatic MIME type detection for common types (HTML, CSS, JS, JSON, images, etc.)
+- Automatic MIME type detection for common types (HTML, CSS, JS, JSON, images, fonts, video, audio, etc.)
 - Auto-generated directory listings when no `index.html` is present
 - Gzip compression for text-based content types when client sends `Accept-Encoding: gzip`
 - Path traversal protection (blocks `..` in paths, validates resolved path stays under root)
+- **Range Requests** — `Range` header support (HTTP 206 Partial Content) for video streaming and download resumption
+- **Conditional Requests** — `ETag` and `Last-Modified` headers are generated; `If-None-Match` and
+  `If-Modified-Since` conditional requests return `304 Not Modified`
+- **Custom Error Pages** — configurable custom error pages for 404 and 403 responses
 
-### Improvements Needed
+### Remaining Improvements
 
-- **Range Requests** — `Range` header is not supported; needed for video streaming and download resumption
-- **Cache Headers** — `ETag` and `Last-Modified` headers are not generated; `If-None-Match`/`If-Modified-Since`
-  conditional requests are not handled
 - **Brotli Compression** — falls back to gzip; real Brotli requires adding the Brotli4j dependency
-- **Custom Error Pages** — 404 and 403 responses use hardcoded HTML; no support for custom error pages
 
 ---
 
@@ -216,7 +226,9 @@ Transitions:
 
 ### Current Implementation
 
-REST endpoints at `/admin/*`, protected by API key, Basic auth, and/or IP whitelist:
+REST endpoints at `/admin/*`, protected by API key, Basic auth, and/or IP whitelist.
+
+**The admin API is disabled by default.** To enable it, set `"enabled": true` in the `admin` section of the config file.
 
 | Endpoint                 | Method | Description                                           |
 |--------------------------|--------|-------------------------------------------------------|
@@ -225,21 +237,21 @@ REST endpoints at `/admin/*`, protected by API key, Basic auth, and/or IP whitel
 | `/admin/stats`           | GET    | Server statistics (memory, threads, request counts)   |
 | `/admin/routes`          | GET    | Current route configuration                           |
 | `/admin/routes/reload`   | POST   | Reload configuration from disk                        |
-| `/admin/circuits`        | GET    | Circuit breaker status                                |
+| `/admin/circuits`        | GET    | Circuit breaker status (actual states per backend)    |
 | `/admin/circuits/reset`  | POST   | Reset circuit breakers. Query param: `?backend=<url>` |
-| `/admin/ratelimit`       | GET    | Rate limiter status                                   |
+| `/admin/ratelimit`       | GET    | Rate limiter status (actual data)                     |
 | `/admin/ratelimit/reset` | POST   | Reset rate limiters                                   |
+| `/admin/backends`        | GET    | Backend health status                                 |
 | `/admin/config`          | GET    | Server feature list                                   |
-| `/admin/config/update`   | POST   | **Not implemented** — returns error                   |
+| `/admin/config/update`   | POST   | Update server configuration at runtime                |
 
-### Improvements Needed
+**Proper HTTP status codes:**
 
-- **Circuit Breaker Status** — `/admin/circuits` returns an empty list instead of actual circuit states
-- **Rate Limiter Status** — `/admin/ratelimit` returns hardcoded placeholder data
-- **Config Update** — `/admin/config/update` is not implemented
-- **Response Status Codes** — all responses return `200 OK` even for errors; should use `400`, `404`, `405`
-  appropriately
-- **Backend Health in API** — no endpoint to view individual backend health status
+- `404 Not Found` for unknown admin endpoints
+- `405 Method Not Allowed` for wrong HTTP methods
+
+### Remaining Improvements
+
 - **Request Body Parsing** — POST endpoints don't fully parse request bodies for parameters
 
 ---
@@ -268,12 +280,24 @@ nanoserver_request_duration_ms_sum
 nanoserver_request_duration_ms_count
 ```
 
-### Improvements Needed
+**Per-backend metrics:**
 
-- **Backend-Specific Metrics** — no per-backend request counts, latency, or error rates
-- **Circuit Breaker Metrics** — state changes not exported
-- **Rate Limiter Metrics** — rejected requests not broken out
-- **Connection Duration** — not tracked
+- `nanoserver_backend_requests_total{backend="..."}` — per-backend request counts
+- `nanoserver_backend_latency_ms{backend="..."}` — per-backend latency
+- `nanoserver_backend_errors_total{backend="..."}` — per-backend error counts
+
+**Circuit breaker and rate limiter metrics:**
+
+- `nanoserver_circuit_breaker_state_changes` — circuit breaker state transitions
+- `nanoserver_rate_limit_rejections` — rate limiter rejected requests
+
+**Connection duration tracking:**
+
+- `nanoserver_connection_duration_ms_sum` — total connection time
+- `nanoserver_connection_duration_ms_count` — number of connections tracked
+
+### Remaining Improvements
+
 - **`bytes_sent`** — often recorded as 0 because response size is not captured from the proxy relay
 
 ---
@@ -289,6 +313,7 @@ JSON-formatted access logs to stdout:
   "timestamp": "2026-01-16T10:30:45.123Z",
   "level": "INFO",
   "type": "access",
+  "request_id": "a1b2c3d4-e5f6-7890-abcd-ef1234567890",
   "client_ip": "192.168.1.100",
   "method": "GET",
   "path": "/api/users",
@@ -302,11 +327,12 @@ JSON-formatted access logs to stdout:
 
 Also supports error and info log types.
 
-### Improvements Needed
+**Request ID / Trace ID** — each request is assigned a UUID-based request ID for tracing across the proxy and backend.
+
+### Remaining Improvements
 
 - **Log to File** — currently stdout only; should support configurable file output and rotation
 - **Log Level Configuration** — no way to control log verbosity
-- **Request ID / Trace ID** — no correlation ID for tracing requests across the proxy and backend
 
 ---
 
@@ -318,11 +344,11 @@ Also supports error and info log types.
 - Uses `AtomicReference` for lock-free config swap
 - Active requests use old config; new requests use updated config
 - New backends are registered for health checking on reload
+- **Validation Before Swap** — `ConfigValidator` validates the new configuration before applying it; invalid configs
+  are logged as warnings and not swapped in
 
-### Improvements Needed
+### Remaining Improvements
 
-- **Validation Before Swap** — invalid config could be loaded; `ConfigValidator` exists but its integration with the
-  reload path should be verified
 - **Reload Notification** — no webhook or event mechanism to notify of reload success/failure
 - **Partial Reload** — all configuration is reloaded; no way to update just routes without re-reading the entire file
 

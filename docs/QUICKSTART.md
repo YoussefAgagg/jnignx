@@ -137,6 +137,7 @@ Enable rate limiting, circuit breaker, CORS, and admin API:
     "maxAge": 3600
   },
   "admin": {
+    "enabled": true,
     "authentication": {
       "apiKey": "${ADMIN_API_KEY}",
       "ipWhitelist": ["127.0.0.1", "::1"]
@@ -204,6 +205,7 @@ java -XX:+UseZGC --enable-preview -jar jnignx.jar
 
 ## Next Steps
 
+- [Proxy Setup Guide](proxy-setup.md) — domain-based routing, multi-app proxy setup, production deployment
 - [Configuration Reference](configuration.md) — all options explained
 - [Features Guide](features.md) — deep dive into each feature
 - [Admin API Reference](api.md) — runtime management endpoints

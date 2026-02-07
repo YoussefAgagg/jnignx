@@ -274,6 +274,19 @@ public class Worker implements Runnable {
 
       // Check for admin API
       if (AdminHandler.isAdminRequest(path)) {
+        // Admin API must be explicitly enabled in config
+        if (!serverConfig.adminEnabled()) {
+          new StaticHandler().handle404(clientChannel);
+          long duration = System.currentTimeMillis() - startTime;
+          AccessLogger.logAccess(requestId, clientIp, method, path, 404, duration, 0, userAgent,
+                                 "admin-disabled");
+          metrics.recordRequest(404, duration, path, totalBytesRead, 0);
+          if (!keepAlive) {
+            break;
+          }
+          continue;
+        }
+
         // Check admin authentication
         if (adminAuth.isEnabled()) {
           String authHeader = request.headers().get("Authorization");

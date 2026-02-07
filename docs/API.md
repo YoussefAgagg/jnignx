@@ -2,6 +2,9 @@
 
 JNignx exposes REST endpoints under `/admin/*` for runtime management, plus two internal endpoints at the root level.
 
+> **Note:** The admin API is **disabled by default**. To enable it, set `"enabled": true` in the `admin` section of
+> your configuration file. See [Configuration Reference](configuration.md#admin) for details.
+
 ---
 
 ## Authentication
@@ -11,6 +14,7 @@ Admin endpoints (`/admin/*`) are protected when authentication is configured:
 ```json
 {
   "admin": {
+    "enabled": true,
     "authentication": {
       "apiKey": "${ADMIN_API_KEY}",
       "ipWhitelist": [
@@ -30,13 +34,13 @@ Admin endpoints (`/admin/*`) are protected when authentication is configured:
 | Basic Auth   | `Authorization: Basic <base64>` | `curl -u admin:password ...`                |
 | IP Whitelist | *(automatic)*                   | Requests from whitelisted IPs bypass auth   |
 
-If no authentication is configured, admin endpoints are open to all.
+If no authentication is configured (but admin is enabled), admin endpoints are open to all.
 
 ---
 
 ## Internal Endpoints
 
-These endpoints are always available (no authentication required).
+These endpoints are always available (no authentication required, independent of admin enabled/disabled).
 
 ### `GET /health`
 
@@ -97,16 +101,26 @@ nanoserver_bytes_received_total 52428800
 # HELP nanoserver_bytes_sent_total Total bytes sent
 # TYPE nanoserver_bytes_sent_total counter
 nanoserver_bytes_sent_total 104857600
+
+# Per-backend metrics
+nanoserver_backend_requests_total{backend="http://localhost:3000"} 6000
+nanoserver_backend_latency_ms{backend="http://localhost:3000"} 25
+nanoserver_backend_errors_total{backend="http://localhost:3000"} 5
+
+# Circuit breaker and rate limiter metrics
+nanoserver_circuit_breaker_state_changes 3
+nanoserver_rate_limit_rejections 120
+
+# Connection duration tracking
+nanoserver_connection_duration_ms_sum 1234567
+nanoserver_connection_duration_ms_count 5432
 ```
 
 ---
 
 ## Admin Endpoints
 
-All admin endpoints return JSON. All require authentication if configured.
-
-> **Known limitation:** All responses currently return HTTP `200 OK` regardless of success/failure. Check the `success`
-> field in the response body to determine the actual result.
+All admin endpoints return JSON and use proper HTTP status codes. All require authentication if configured.
 
 ### `GET /admin/health`
 
@@ -203,9 +217,7 @@ curl -X POST http://localhost:8080/admin/routes/reload
 
 ### `GET /admin/circuits`
 
-Circuit breaker status.
-
-> **Known limitation:** Currently returns an empty list. The circuit breaker state is not aggregated for reporting.
+Circuit breaker status for all registered backends.
 
 ```bash
 curl http://localhost:8080/admin/circuits
@@ -213,7 +225,22 @@ curl http://localhost:8080/admin/circuits
 
 ```json
 {
-  "circuits": []
+  "circuits": {
+    "http://localhost:3000": {
+      "state": "CLOSED",
+      "failure_count": 0,
+      "success_count": 150,
+      "half_open_requests": 0,
+      "success_rate": 1.0
+    },
+    "http://localhost:3001": {
+      "state": "OPEN",
+      "failure_count": 5,
+      "success_count": 20,
+      "half_open_requests": 0,
+      "success_rate": 0.8
+    }
+  }
 }
 ```
 
@@ -239,9 +266,7 @@ curl -X POST "http://localhost:8080/admin/circuits/reset?backend=http://localhos
 
 ### `GET /admin/ratelimit`
 
-Rate limiter status.
-
-> **Known limitation:** Currently returns placeholder data rather than actual rate limiter state.
+Rate limiter status with actual data.
 
 ```bash
 curl http://localhost:8080/admin/ratelimit
@@ -251,7 +276,11 @@ curl http://localhost:8080/admin/ratelimit
 {
   "rate_limiter": {
     "enabled": true,
-    "active_clients": 0
+    "strategy": "token-bucket",
+    "requests_per_second": 1000,
+    "burst_size": 2000,
+    "active_clients": 15,
+    "total_rejected": 120
   }
 }
 ```
@@ -269,6 +298,31 @@ curl -X POST http://localhost:8080/admin/ratelimit/reset
   "success": true,
   "message": "Rate limiters reset",
   "timestamp": "2026-02-07T14:00:00Z"
+}
+```
+
+### `GET /admin/backends`
+
+Backend health status for all registered backends.
+
+```bash
+curl http://localhost:8080/admin/backends
+```
+
+```json
+{
+  "backends": {
+    "http://localhost:3000": {
+      "healthy": true,
+      "consecutive_failures": 0,
+      "consecutive_successes": 5
+    },
+    "http://localhost:3001": {
+      "healthy": false,
+      "consecutive_failures": 3,
+      "consecutive_successes": 0
+    }
+  }
 }
 ```
 
@@ -301,16 +355,18 @@ curl http://localhost:8080/admin/config
 
 ### `POST /admin/config/update`
 
-**Not implemented.** Returns an error response.
+Update server configuration at runtime.
 
 ```bash
-curl -X POST http://localhost:8080/admin/config/update
+curl -X POST http://localhost:8080/admin/config/update \
+  -H "Content-Type: application/json" \
+  -d '{"rateLimiter": {"enabled": true}}'
 ```
 
 ```json
 {
-  "success": false,
-  "error": "Configuration updates not yet implemented",
+  "success": true,
+  "message": "Configuration updated",
   "timestamp": "2026-02-07T14:00:00Z"
 }
 ```
@@ -319,7 +375,7 @@ curl -X POST http://localhost:8080/admin/config/update
 
 ## Error Responses
 
-When a request fails or targets an unknown endpoint:
+**404 Not Found** — when a request targets an unknown admin endpoint:
 
 ```json
 {
@@ -329,7 +385,7 @@ When a request fails or targets an unknown endpoint:
 }
 ```
 
-When the wrong HTTP method is used:
+**405 Method Not Allowed** — when the wrong HTTP method is used:
 
 ```json
 {
@@ -339,4 +395,5 @@ When the wrong HTTP method is used:
 }
 ```
 
-When authentication fails, the server responds with `401 Unauthorized` before reaching the admin handler.
+**401 Unauthorized** — when authentication fails, the server responds with `401 Unauthorized` before reaching the admin
+handler.

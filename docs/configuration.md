@@ -39,6 +39,10 @@ The only required field is `routes`:
     ]
   },
   "loadBalancer": "round-robin",
+  "backendWeights": {
+    "http://localhost:3000": 3,
+    "http://localhost:3001": 1
+  },
   "rateLimiter": {
     "enabled": true,
     "requestsPerSecond": 1000,
@@ -52,10 +56,13 @@ The only required field is `routes`:
   },
   "healthCheck": {
     "enabled": true,
-    "interval": 10,
-    "timeout": 5,
+    "intervalSeconds": 10,
+    "timeoutSeconds": 5,
     "failureThreshold": 3,
-    "successThreshold": 2
+    "successThreshold": 2,
+    "path": "/healthz",
+    "expectedStatusMin": 200,
+    "expectedStatusMax": 299
   },
   "cors": {
     "enabled": true,
@@ -78,6 +85,7 @@ The only required field is `routes`:
     "maxAge": 3600
   },
   "admin": {
+    "enabled": true,
     "authentication": {
       "apiKey": "${ADMIN_API_KEY}",
       "ipWhitelist": [
@@ -143,11 +151,12 @@ When multiple backends are listed for the same path, requests are distributed ac
 
 Selects how requests are distributed across backends.
 
-| Value                 | Description                                         |
-|-----------------------|-----------------------------------------------------|
-| `"round-robin"`       | Default. Cycles through backends evenly             |
-| `"least-connections"` | Routes to backend with fewest active connections    |
-| `"ip-hash"`           | Consistent hashing on client IP for sticky sessions |
+| Value                    | Description                                                 |
+|--------------------------|-------------------------------------------------------------|
+| `"round-robin"`          | Default. Cycles through backends evenly                     |
+| `"weighted-round-robin"` | Distributes based on backend weights (see `backendWeights`) |
+| `"least-connections"`    | Routes to backend with fewest active connections            |
+| `"ip-hash"`              | Consistent hashing on client IP for sticky sessions         |
 
 ```json
 {
@@ -157,15 +166,36 @@ Selects how requests are distributed across backends.
 
 ---
 
+### `backendWeights`
+
+Assigns weights to backends for the weighted round-robin strategy. Higher weight means more traffic.
+
+```json
+{
+  "loadBalancer": "weighted-round-robin",
+  "backendWeights": {
+    "http://localhost:3000": 3,
+    "http://localhost:3001": 1
+  }
+}
+```
+
+In this example, `localhost:3000` receives 3× more requests than `localhost:3001`.
+
+Backends not listed in the weights map default to weight 1.
+
+---
+
 ### `rateLimiter`
 
-Controls request rate limiting.
+Controls request rate limiting. When enabled, rate limit headers are included on every response:
+`X-RateLimit-Limit`, `X-RateLimit-Remaining`, `X-RateLimit-Reset`.
 
 | Field               | Type    | Default          | Description                                                       |
 |---------------------|---------|------------------|-------------------------------------------------------------------|
 | `enabled`           | boolean | `false`          | Enable rate limiting                                              |
-| `requestsPerSecond` | int     | —                | Maximum requests per second                                       |
-| `burstSize`         | int     | —                | Burst allowance above steady rate                                 |
+| `requestsPerSecond` | int     | `1000`           | Maximum requests per second                                       |
+| `burstSize`         | int     | `2000`           | Burst allowance above steady rate                                 |
 | `strategy`          | string  | `"token-bucket"` | Algorithm: `"token-bucket"`, `"sliding-window"`, `"fixed-window"` |
 
 ```json
@@ -207,33 +237,40 @@ Prevents cascading failures by stopping requests to unhealthy backends.
 
 Configures active backend health monitoring.
 
-| Field              | Type    | Default | Description                                         |
-|--------------------|---------|---------|-----------------------------------------------------|
-| `enabled`          | boolean | `true`  | Enable active health checks                         |
-| `interval`         | int     | `10`    | Seconds between health check probes                 |
-| `timeout`          | int     | `5`     | Seconds to wait for probe response                  |
-| `failureThreshold` | int     | `3`     | Consecutive failures to mark backend unhealthy      |
-| `successThreshold` | int     | `2`     | Consecutive successes to mark backend healthy again |
+| Field               | Type    | Default | Description                                             |
+|---------------------|---------|---------|---------------------------------------------------------|
+| `enabled`           | boolean | `true`  | Enable active health checks                             |
+| `intervalSeconds`   | int     | `10`    | Seconds between health check probes                     |
+| `timeoutSeconds`    | int     | `5`     | Seconds to wait for probe response                      |
+| `failureThreshold`  | int     | `3`     | Consecutive failures to mark backend unhealthy          |
+| `successThreshold`  | int     | `2`     | Consecutive successes to mark backend healthy again     |
+| `path`              | string  | `"/"`   | HTTP path to probe (e.g., `"/healthz"`, `"/ready"`)     |
+| `expectedStatusMin` | int     | `200`   | Minimum HTTP status code considered healthy (inclusive) |
+| `expectedStatusMax` | int     | `399`   | Maximum HTTP status code considered healthy (inclusive) |
 
 ```json
 {
   "healthCheck": {
     "enabled": true,
-    "interval": 10,
-    "timeout": 5,
+    "intervalSeconds": 10,
+    "timeoutSeconds": 5,
     "failureThreshold": 3,
-    "successThreshold": 2
+    "successThreshold": 2,
+    "path": "/healthz",
+    "expectedStatusMin": 200,
+    "expectedStatusMax": 299
   }
 }
 ```
 
-Health checks send `HEAD /` requests to each HTTP backend. `file://` backends are skipped.
+Health checks send `HEAD <path>` requests to each HTTP backend. `file://` backends are skipped.
 
 ---
 
 ### `cors`
 
-Cross-Origin Resource Sharing policy.
+Cross-Origin Resource Sharing policy. CORS headers are included on all responses when enabled, including error
+responses (429, 502, 503).
 
 | Field              | Type     | Default | Description                                 |
 |--------------------|----------|---------|---------------------------------------------|
@@ -242,7 +279,7 @@ Cross-Origin Resource Sharing policy.
 | `allowedMethods`   | string[] | `[]`    | HTTP methods allowed                        |
 | `allowedHeaders`   | string[] | `[]`    | Headers allowed in requests                 |
 | `allowCredentials` | boolean  | `false` | Allow cookies/auth in cross-origin requests |
-| `maxAge`           | int      | `0`     | Seconds to cache preflight response         |
+| `maxAge`           | int      | `3600`  | Seconds to cache preflight response         |
 
 ```json
 {
@@ -272,16 +309,18 @@ Cross-Origin Resource Sharing policy.
 
 ### `admin`
 
-Admin API authentication configuration. The admin API is served under `/admin/*`.
+Admin API configuration. The admin API is served under `/admin/*` and is **disabled by default**.
 
-| Field                        | Type     | Description                                                                     |
-|------------------------------|----------|---------------------------------------------------------------------------------|
-| `authentication.apiKey`      | string   | API key for `Authorization: Bearer <key>` auth. Supports `${ENV_VAR}` expansion |
-| `authentication.ipWhitelist` | string[] | IP addresses allowed to access admin API                                        |
+| Field                        | Type     | Default | Description                                                                     |
+|------------------------------|----------|---------|---------------------------------------------------------------------------------|
+| `enabled`                    | boolean  | `false` | Enable the admin API endpoints                                                  |
+| `authentication.apiKey`      | string   | —       | API key for `Authorization: Bearer <key>` auth. Supports `${ENV_VAR}` expansion |
+| `authentication.ipWhitelist` | string[] | `[]`    | IP addresses allowed to access admin API                                        |
 
 ```json
 {
   "admin": {
+    "enabled": true,
     "authentication": {
       "apiKey": "${ADMIN_API_KEY}",
       "ipWhitelist": [
@@ -292,6 +331,8 @@ Admin API authentication configuration. The admin API is served under `/admin/*`
   }
 }
 ```
+
+When `enabled` is `false` (the default), all requests to `/admin/*` return `404 Not Found`.
 
 ---
 
@@ -361,10 +402,11 @@ String values support `${ENV_VAR}` syntax for environment variable substitution:
 
 The configuration file is monitored for changes. When a modification is detected (polled every 1 second):
 
-1. The new file is parsed and validated
-2. The configuration is atomically swapped (no downtime)
+1. The new file is parsed and validated by `ConfigValidator`
+2. If validation passes, the configuration is atomically swapped (no downtime)
 3. New backends are registered with the health checker
 4. Active requests continue with the old config; new requests use the updated config
+5. If validation fails, the old config remains active and warnings are logged
 
 No server restart is required.
 
