@@ -26,6 +26,9 @@ public final class ServerConfig {
 
   private final Map<String, List<String>> routes;
 
+  // Domain-based routing: domain -> backends
+  private final Map<String, List<String>> domainRoutes;
+
   // Load Balancer
   private final String loadBalancerAlgorithm;
   private final Map<String, Integer> backendWeights;
@@ -71,6 +74,7 @@ public final class ServerConfig {
 
   private ServerConfig(Builder builder) {
     this.routes = Map.copyOf(builder.routes);
+    this.domainRoutes = Map.copyOf(builder.domainRoutes);
     this.loadBalancerAlgorithm = builder.loadBalancerAlgorithm;
     this.backendWeights = Map.copyOf(builder.backendWeights);
 
@@ -113,6 +117,10 @@ public final class ServerConfig {
   // Getters
   public Map<String, List<String>> routes() {
     return routes;
+  }
+
+  public Map<String, List<String>> domainRoutes() {
+    return domainRoutes;
   }
 
   public String loadBalancerAlgorithm() {
@@ -232,6 +240,7 @@ public final class ServerConfig {
 
   public static class Builder {
     private Map<String, List<String>> routes = Map.of();
+    private Map<String, List<String>> domainRoutes = Map.of();
 
     // Defaults
     private String loadBalancerAlgorithm = "round-robin";
@@ -270,6 +279,11 @@ public final class ServerConfig {
 
     public Builder routes(Map<String, List<String>> routes) {
       this.routes = routes;
+      return this;
+    }
+
+    public Builder domainRoutes(Map<String, List<String>> domainRoutes) {
+      this.domainRoutes = domainRoutes;
       return this;
     }
 

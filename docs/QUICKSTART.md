@@ -34,12 +34,23 @@ Create a `routes.json` file (or use the included example):
     "/": [
       "http://localhost:8080"
     ]
+  },
+  "domainRoutes": {
+    "app.example.com": [
+      "http://localhost:3000"
+    ],
+    "api.example.com": [
+      "http://localhost:8081"
+    ]
   }
 }
 ```
 
-Each key is a URL path prefix. Each value is a list of backend URLs. Requests matching the prefix are forwarded to one
+**Path-based routing** (`routes`): Each key is a URL path prefix. Requests matching the prefix are forwarded to one
 of the backends using round-robin load balancing.
+
+**Domain-based routing** (`domainRoutes`): Routes requests by the `Host` header. Domain routing takes priority over
+path routing. If no domain matches, path-based routing is used as fallback.
 
 Use `file://` URLs to serve static files from a local directory.
 
@@ -76,6 +87,23 @@ curl http://localhost:8080/metrics
 ```
 
 ## Common Patterns
+
+### Domain Routing — Multi-App Server
+
+Route different domains to different applications running on the same server:
+
+```json
+{
+  "routes": {
+    "/": ["http://localhost:8080"]
+  },
+  "domainRoutes": {
+    "app.example.com": ["http://localhost:3000"],
+    "api.example.com": ["http://localhost:8081", "http://localhost:8082"],
+    "admin.example.com": ["http://localhost:4000"]
+  }
+}
+```
 
 ### API Gateway
 
@@ -206,6 +234,7 @@ java -XX:+UseZGC --enable-preview -jar jnignx.jar
 ## Next Steps
 
 - [Proxy Setup Guide](proxy-setup.md) — domain-based routing, multi-app proxy setup, production deployment
+- [GraalVM Native Guide](graalvm-native-guide.md) — build native binary, deploy with HTTP/HTTPS/WebSocket
 - [Configuration Reference](configuration.md) — all options explained
 - [Features Guide](features.md) — deep dive into each feature
 - [Admin API Reference](api.md) — runtime management endpoints

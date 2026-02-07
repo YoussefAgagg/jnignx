@@ -18,6 +18,8 @@ Foreign Function & Memory API (Project Panama) for high concurrency and low-late
 
 - **Reverse Proxy** — HTTP/1.1 request forwarding with `X-Forwarded-For`, `X-Real-IP`, `X-Forwarded-Proto` headers,
   chunked transfer encoding, retry logic with alternate backends, and proper `502 Bad Gateway` error responses
+- **Domain-Based Routing** — route requests by `Host` header (e.g., `app.example.com` → port 3000,
+  `api.example.com` → port 8081) with fallback to path-based routing
 - **Virtual Threads** — one virtual thread per connection for massive concurrency
 - **Off-Heap Memory (FFM API)** — `Arena` / `MemorySegment` buffers to reduce GC pressure
 - **Load Balancing** — round-robin, weighted round-robin, least-connections, IP-hash (sticky sessions)
@@ -80,21 +82,28 @@ cd jnignx
 ./gradlew run --args="9090 routes-full.json"
 ```
 
-Create a minimal `routes.json`:
+Create a minimal `routes.json` with domain routing:
 
 ```json
 {
   "routes": {
-    "/api": [
-      "http://localhost:3000",
-      "http://localhost:3001"
-    ],
-    "/static": [
-      "file:///var/www/html"
-    ],
-    "/": [
-      "http://localhost:8081"
-    ]
+    "/": ["http://localhost:8080"]
+  },
+  "domainRoutes": {
+    "app.example.com": ["http://localhost:3000"],
+    "api.example.com": ["http://localhost:8081", "http://localhost:8082"]
+  }
+}
+```
+
+Or use path-based routing only:
+
+```json
+{
+  "routes": {
+    "/api": ["http://localhost:3000", "http://localhost:3001"],
+    "/static": ["file:///var/www/html"],
+    "/": ["http://localhost:8081"]
   }
 }
 ```
@@ -110,6 +119,7 @@ See the [Quick Start Guide](docs/quickstart.md) for detailed setup instructions.
 | [Quick Start Guide](docs/quickstart.md)              | Installation, first run, basic configuration                     |
 | [Configuration Reference](docs/configuration.md)     | All `routes.json` options explained                              |
 | [Proxy Setup Guide](docs/proxy-setup.md)             | Domain-based routing, multi-app proxy setup                      |
+| [GraalVM Native Guide](docs/graalvm-native-guide.md) | Build native binary, production deployment with HTTP/HTTPS/WS    |
 | [Features Guide](docs/features.md)                   | Deep dive into each implemented feature and what can be improved |
 | [Architecture](docs/architecture.md)                 | Internal design, threading model, memory management              |
 | [Admin API Reference](docs/api.md)                   | REST endpoints for runtime management                            |

@@ -125,6 +125,9 @@ public final class Router {
         System.out.println("[Router] Admin Auth: " +
                                (serverConfig.adminAuth().isEnabled() ? "enabled" : "disabled"));
         System.out.println("[Router] Health Check Path: " + serverConfig.healthCheckPath());
+        if (!serverConfig.domainRoutes().isEmpty()) {
+          System.out.println("[Router] Domain Routes: " + serverConfig.domainRoutes().keySet());
+        }
       } catch (Exception e) {
         // Fallback to simple RouteConfig for backward compatibility
         System.out.println(
@@ -136,13 +139,24 @@ public final class Router {
         System.out.println("[Router] Routes: " + newConfig.routes().keySet());
       }
 
-      // Start health checking for all backends
+      // Start health checking for all backends (path routes + domain routes)
       List<String> allBackends = new ArrayList<>();
       for (List<String> backends : configRef.get().routes().values()) {
         for (String backend : backends) {
           if (!allBackends.contains(backend)) {
             allBackends.add(backend);
             healthChecker.registerBackend(backend);
+          }
+        }
+      }
+      ServerConfig currentConfig = serverConfigRef.get();
+      if (currentConfig.domainRoutes() != null) {
+        for (List<String> backends : currentConfig.domainRoutes().values()) {
+          for (String backend : backends) {
+            if (!allBackends.contains(backend)) {
+              allBackends.add(backend);
+              healthChecker.registerBackend(backend);
+            }
           }
         }
       }
@@ -269,24 +283,48 @@ public final class Router {
   }
 
   /**
-   * Resolves a request path to a backend URL using the configured load balancing strategy.
+   * Resolves a request to a backend URL using domain-based routing first,
+   * then falling back to path-based routing.
    *
-   * <p>This method is thread-safe and uses the configured LoadBalancer for
-   * backend selection with automatic health checking.
+   * <p>Domain routing takes priority: if the Host header matches a configured
+   * domain in {@code domainRoutes}, that backend is used regardless of path.
+   * Otherwise, standard path-prefix matching is used.
+   *
+   * @param host     the Host header value (may include port, e.g., "app.example.com:8080")
+   * @param path     the request path to route
+   * @param clientIp the client IP address (used for IP hash load balancing)
+   * @return the selected backend URL, or null if no route matches
+   */
+  public String resolveBackend(String host, String path, String clientIp) {
+    // Try domain-based routing first
+    if (host != null && !host.isBlank()) {
+      ServerConfig config = serverConfigRef.get();
+      Map<String, List<String>> domainRoutes = config.domainRoutes();
+      if (domainRoutes != null && !domainRoutes.isEmpty()) {
+        // Strip port from Host header (e.g., "app.example.com:8080" -> "app.example.com")
+        String domain = host.contains(":") ? host.substring(0, host.indexOf(':')) : host;
+        domain = domain.toLowerCase().trim();
+
+        List<String> backends = domainRoutes.get(domain);
+        if (backends != null && !backends.isEmpty()) {
+          return loadBalancer.selectBackend(domain, backends, clientIp);
+        }
+      }
+    }
+
+    // Fall back to path-based routing
+    return resolveBackendByPath(path, clientIp);
+  }
+
+  /**
+   * Resolves a request path to a backend URL using path-based routing only.
    *
    * @param path the request path to route
    * @param clientIp the client IP address (used for IP hash load balancing)
    * @return the selected backend URL, or null if no route matches
    */
   public String resolveBackend(String path, String clientIp) {
-    RouteConfig config = configRef.get();
-    List<String> backends = config.getBackends(path);
-
-    if (backends == null || backends.isEmpty()) {
-      return null;
-    }
-
-    return loadBalancer.selectBackend(path, backends, clientIp);
+    return resolveBackend(null, path, clientIp);
   }
 
   /**
@@ -296,7 +334,21 @@ public final class Router {
    * @return the selected backend URL, or null if no route matches
    */
   public String resolveBackend(String path) {
-    return resolveBackend(path, null);
+    return resolveBackend(null, path, null);
+  }
+
+  /**
+   * Internal path-based backend resolution.
+   */
+  private String resolveBackendByPath(String path, String clientIp) {
+    RouteConfig config = configRef.get();
+    List<String> backends = config.getBackends(path);
+
+    if (backends == null || backends.isEmpty()) {
+      return null;
+    }
+
+    return loadBalancer.selectBackend(path, backends, clientIp);
   }
 
   /**

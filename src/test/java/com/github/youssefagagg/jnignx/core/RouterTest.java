@@ -3,6 +3,7 @@ package com.github.youssefagagg.jnignx.core;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNotEquals;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
+import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import java.nio.file.Files;
@@ -256,5 +257,150 @@ class RouterTest {
     router.recordConnectionStart(backend);
     router.recordConnectionEnd(backend);
     router.recordProxySuccess(backend);
+  }
+
+  @Test
+  void testDomainRouting() throws Exception {
+    String config = """
+        {
+          "routes": {
+            "/": ["http://default:8080"]
+          },
+          "domainRoutes": {
+            "app.example.com": ["http://app-backend:3000"],
+            "api.example.com": ["http://api-backend:8081"]
+          }
+        }
+        """;
+    Files.writeString(configFile, config);
+
+    router = new Router(configFile);
+    router.loadConfig();
+
+    // Domain routing should match
+    String backend = router.resolveBackend("app.example.com", "/anything", "192.168.1.1");
+    assertEquals("http://app-backend:3000", backend);
+
+    backend = router.resolveBackend("api.example.com", "/users", "192.168.1.1");
+    assertEquals("http://api-backend:8081", backend);
+  }
+
+  @Test
+  void testDomainRoutingWithPort() throws Exception {
+    String config = """
+        {
+          "routes": {
+            "/": ["http://default:8080"]
+          },
+          "domainRoutes": {
+            "app.example.com": ["http://app-backend:3000"]
+          }
+        }
+        """;
+    Files.writeString(configFile, config);
+
+    router = new Router(configFile);
+    router.loadConfig();
+
+    // Host header with port should still match the domain
+    String backend = router.resolveBackend("app.example.com:8080", "/test", "192.168.1.1");
+    assertEquals("http://app-backend:3000", backend);
+  }
+
+  @Test
+  void testDomainRoutingCaseInsensitive() throws Exception {
+    String config = """
+        {
+          "routes": {
+            "/": ["http://default:8080"]
+          },
+          "domainRoutes": {
+            "App.Example.COM": ["http://app-backend:3000"]
+          }
+        }
+        """;
+    Files.writeString(configFile, config);
+
+    router = new Router(configFile);
+    router.loadConfig();
+
+    // Domain matching should be case-insensitive
+    String backend = router.resolveBackend("app.example.com", "/test", "192.168.1.1");
+    assertEquals("http://app-backend:3000", backend);
+  }
+
+  @Test
+  void testDomainRoutingFallbackToPathRouting() throws Exception {
+    String config = """
+        {
+          "routes": {
+            "/api": ["http://api-backend:8080"],
+            "/": ["http://default:8080"]
+          },
+          "domainRoutes": {
+            "app.example.com": ["http://app-backend:3000"]
+          }
+        }
+        """;
+    Files.writeString(configFile, config);
+
+    router = new Router(configFile);
+    router.loadConfig();
+
+    // Unknown domain should fall back to path routing
+    String backend = router.resolveBackend("unknown.example.com", "/api", "192.168.1.1");
+    assertEquals("http://api-backend:8080", backend);
+
+    // Null host should fall back to path routing
+    backend = router.resolveBackend(null, "/api", "192.168.1.1");
+    assertEquals("http://api-backend:8080", backend);
+  }
+
+  @Test
+  void testDomainRoutingNoMatch() throws Exception {
+    String config = """
+        {
+          "routes": {
+            "/api": ["http://api-backend:8080"]
+          },
+          "domainRoutes": {
+            "app.example.com": ["http://app-backend:3000"]
+          }
+        }
+        """;
+    Files.writeString(configFile, config);
+
+    router = new Router(configFile);
+    router.loadConfig();
+
+    // Unknown domain + non-matching path = null
+    String backend = router.resolveBackend("unknown.example.com", "/unknown", "192.168.1.1");
+    assertNull(backend);
+  }
+
+  @Test
+  void testDomainRoutingMultipleBackends() throws Exception {
+    String config = """
+        {
+          "routes": {
+            "/": ["http://default:8080"]
+          },
+          "domainRoutes": {
+            "app.example.com": ["http://app1:3000", "http://app2:3001"]
+          }
+        }
+        """;
+    Files.writeString(configFile, config);
+
+    router = new Router(configFile, LoadBalancer.Strategy.ROUND_ROBIN);
+    router.loadConfig();
+
+    String backend1 = router.resolveBackend("app.example.com", "/", "192.168.1.1");
+    String backend2 = router.resolveBackend("app.example.com", "/", "192.168.1.1");
+
+    assertNotNull(backend1);
+    assertNotNull(backend2);
+    // Round robin should alternate between the two backends
+    assertNotEquals(backend1, backend2);
   }
 }

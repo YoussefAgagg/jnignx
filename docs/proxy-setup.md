@@ -9,17 +9,17 @@ incoming requests to the correct applications running on the machine.
 
 JNignx acts as a **front-facing reverse proxy** that sits between the internet and your backend applications. All
 incoming HTTP/HTTPS traffic hits JNignx on ports 80/443, and JNignx routes each request to the correct backend
-application based on the URL path.
+application based on the **domain name** (Host header) and/or **URL path**.
 
 ```
-                        ┌──────────────────────────────┐
-                        │         JNignx (port 80)     │
-   Internet Traffic ──► │                              │
-                        │  /api/*    ──► App A :3000   │
-                        │  /admin/*  ──► App B :4000   │
-                        │  /static/* ──► files on disk │
-                        │  /*        ──► App C :8080   │
-                        └──────────────────────────────┘
+                        ┌─────────────────────────────────────┐
+                        │           JNignx (port 80/443)      │
+   Internet Traffic ──► │                                     │
+                        │  app.example.com  ──► App A :3000   │
+                        │  api.example.com  ──► App B :8081   │
+                        │  /static/*        ──► files on disk │
+                        │  /*               ──► App C :8080   │
+                        └─────────────────────────────────────┘
 ```
 
 ---
@@ -132,10 +132,119 @@ Once DNS propagates, all traffic for these domains reaches your server on port 8
 
 ---
 
-## Multi-Domain Setup with Path-Based Routing
+## Domain-Based Routing
 
-Since JNignx routes based on **URL paths**, you can serve multiple domains from the same JNignx instance by
-structuring your paths:
+JNignx supports routing requests to different backends based on the **domain name** (Host header). This is the
+recommended approach for serving multiple applications from a single JNignx instance.
+
+### Basic Domain Routing
+
+Use the `domainRoutes` configuration to map domain names to backends:
+
+```json
+{
+  "routes": {
+    "/": ["http://localhost:8080"]
+  },
+  "domainRoutes": {
+    "app.example.com": ["http://localhost:3000"],
+    "api.example.com": ["http://localhost:8081"],
+    "blog.example.com": ["http://localhost:4000"],
+    "static.example.com": ["file:///var/www/static"]
+  }
+}
+```
+
+**How domain routing works:**
+
+- When a request arrives, JNignx checks the `Host` header against `domainRoutes` first
+- If the domain matches, the request is forwarded to the configured backend(s)
+- If no domain matches, JNignx falls back to **path-based routing** using `routes`
+- Domain matching is **case-insensitive** and automatically strips the port from the Host header
+- Each domain can have multiple backends for load balancing
+
+### Example: Multi-App Server
+
+Suppose you have three applications running on your server:
+
+| Application     | Port | Domain            |
+|-----------------|------|-------------------|
+| Frontend App    | 3000 | app.example.com   |
+| REST API        | 8081 | api.example.com   |
+| Admin Dashboard | 4000 | admin.example.com |
+
+Configure JNignx:
+
+```json
+{
+  "routes": {
+    "/": ["http://localhost:3000"]
+  },
+  "domainRoutes": {
+    "app.example.com": ["http://localhost:3000"],
+    "api.example.com": ["http://localhost:8081", "http://localhost:8082"],
+    "admin.example.com": ["http://localhost:4000"]
+  },
+  "loadBalancer": "round-robin",
+  "healthCheck": {
+    "enabled": true,
+    "intervalSeconds": 10,
+    "path": "/health"
+  }
+}
+```
+
+Then set up DNS records pointing all subdomains to your server IP:
+
+```
+app.example.com     A     203.0.113.10
+api.example.com     A     203.0.113.10
+admin.example.com   A     203.0.113.10
+```
+
+### Domain + Path Routing Combined
+
+You can use both `domainRoutes` and `routes` together. Domain routing takes priority:
+
+```json
+{
+  "routes": {
+    "/api": ["http://localhost:8081"],
+    "/assets": ["file:///var/www/assets"],
+    "/": ["http://localhost:8080"]
+  },
+  "domainRoutes": {
+    "app.example.com": ["http://localhost:3000"],
+    "api.example.com": ["http://localhost:8081"]
+  }
+}
+```
+
+- `app.example.com/anything` → `http://localhost:3000` (domain match)
+- `api.example.com/anything` → `http://localhost:8081` (domain match)
+- `unknown.example.com/api/users` → `http://localhost:8081` (path fallback)
+- `unknown.example.com/` → `http://localhost:8080` (path fallback)
+
+### WebSocket Support with Domain Routing
+
+Domain routing works with WebSocket connections too. If a client sends a WebSocket upgrade
+request to `ws.example.com`, JNignx detects the upgrade headers and proxies the full
+bidirectional WebSocket connection to the backend:
+
+```json
+{
+  "domainRoutes": {
+    "ws.example.com": ["http://localhost:9000"],
+    "app.example.com": ["http://localhost:3000"]
+  }
+}
+```
+
+---
+
+## Path-Based Routing
+
+For simpler setups or when you don't need domain-based routing, use path-based routing only:
 
 ```json
 {
@@ -150,9 +259,6 @@ structuring your paths:
     "/blog": [
       "http://localhost:4000"
     ],
-    "/shop": [
-      "http://localhost:5000"
-    ],
     "/assets": [
       "file:///var/www/assets"
     ],
@@ -163,25 +269,7 @@ structuring your paths:
 }
 ```
 
-All domains (`example.com`, `www.example.com`, `api.example.com`) are handled by the same routing table. The backend
-receives the full original path, so `/api/v1/users` is forwarded as-is to `http://localhost:3000/api/v1/users`.
-
----
-
-## Multi-Domain with Separate JNignx Instances
-
-If you need completely separate routing per domain, run multiple JNignx instances on different ports behind an OS-level
-port forwarder or a front proxy:
-
-```bash
-# Instance 1: example.com on port 8001
-java --enable-preview -jar jnignx.jar 8001 routes-example.json &
-
-# Instance 2: shop.example.com on port 8002
-java --enable-preview -jar jnignx.jar 8002 routes-shop.json &
-```
-
-Then use iptables or another proxy to forward traffic based on hostname.
+JNignx uses **longest prefix match** — a request to `/api/v1/users` matches `/api/v1` (not `/api` or `/`).
 
 ---
 
@@ -282,18 +370,11 @@ sudo java --enable-preview \
 
 ## Production Configuration Example
 
-A complete production setup with all features enabled:
+A complete production setup with domain routing, load balancing, and all features enabled:
 
 ```json
 {
   "routes": {
-    "/api/v1": [
-      "http://localhost:3000",
-      "http://localhost:3001"
-    ],
-    "/api/v2": [
-      "http://localhost:3002"
-    ],
     "/static": [
       "file:///var/www/static"
     ],
@@ -302,6 +383,19 @@ A complete production setup with all features enabled:
       "http://localhost:8081"
     ]
   },
+   "domainRoutes": {
+      "app.example.com": [
+         "http://localhost:3000",
+         "http://localhost:3001"
+      ],
+      "api.example.com": [
+         "http://localhost:8081",
+         "http://localhost:8082"
+      ],
+      "admin.example.com": [
+         "http://localhost:4000"
+      ]
+   },
   "loadBalancer": "least-connections",
   "healthCheck": {
     "enabled": true,

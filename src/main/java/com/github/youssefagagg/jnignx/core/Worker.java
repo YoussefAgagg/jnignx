@@ -338,8 +338,9 @@ public class Worker implements Runnable {
         continue;
       }
 
-      // Route request
-      String backend = router.resolveBackend(path, clientIp);
+      // Route request (domain-based routing first, then path-based)
+      String hostHeader = request.headers().get("Host");
+      String backend = router.resolveBackend(hostHeader, path, clientIp);
       int status = 200;
       long bytesSent = 0;
 

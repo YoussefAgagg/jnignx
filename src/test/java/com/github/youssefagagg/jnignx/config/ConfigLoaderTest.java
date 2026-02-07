@@ -280,4 +280,52 @@ class ConfigLoaderTest {
     assertNotNull(routeConfig);
     assertEquals(3, routeConfig.routes().get("/api").size());
   }
+
+  @Test
+  void testLoadWithDomainRoutes() throws Exception {
+    String config = """
+        {
+          "routes": {
+            "/": ["http://default:8080"]
+          },
+          "domainRoutes": {
+            "app.example.com": ["http://app-backend:3000"],
+            "api.example.com": ["http://api1:8081", "http://api2:8082"]
+          }
+        }
+        """;
+    Path configFile = tempDir.resolve("config.json");
+    Files.writeString(configFile, config);
+
+    ServerConfig serverConfig = ConfigLoader.loadServerConfig(configFile);
+
+    assertNotNull(serverConfig);
+    assertNotNull(serverConfig.domainRoutes());
+    assertEquals(2, serverConfig.domainRoutes().size());
+    assertTrue(serverConfig.domainRoutes().containsKey("app.example.com"));
+    assertTrue(serverConfig.domainRoutes().containsKey("api.example.com"));
+    assertEquals(1, serverConfig.domainRoutes().get("app.example.com").size());
+    assertEquals("http://app-backend:3000",
+                 serverConfig.domainRoutes().get("app.example.com").get(0));
+    assertEquals(2, serverConfig.domainRoutes().get("api.example.com").size());
+  }
+
+  @Test
+  void testLoadWithDomainRoutesEmpty() throws Exception {
+    String config = """
+        {
+          "routes": {
+            "/": ["http://default:8080"]
+          }
+        }
+        """;
+    Path configFile = tempDir.resolve("config.json");
+    Files.writeString(configFile, config);
+
+    ServerConfig serverConfig = ConfigLoader.loadServerConfig(configFile);
+
+    assertNotNull(serverConfig);
+    assertNotNull(serverConfig.domainRoutes());
+    assertTrue(serverConfig.domainRoutes().isEmpty());
+  }
 }

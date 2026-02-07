@@ -38,6 +38,15 @@ The only required field is `routes`:
       "http://localhost:8080"
     ]
   },
+  "domainRoutes": {
+    "app.example.com": [
+      "http://localhost:3000"
+    ],
+    "api.example.com": [
+      "http://localhost:8081",
+      "http://localhost:8082"
+    ]
+  },
   "loadBalancer": "round-robin",
   "backendWeights": {
     "http://localhost:3000": 3,
@@ -144,6 +153,41 @@ Maps URL path prefixes to lists of backend URLs. Longest prefix match wins.
 | `file:///absolute/path` | Serve static files from directory |
 
 When multiple backends are listed for the same path, requests are distributed according to the load balancing strategy.
+
+---
+
+### `domainRoutes`
+
+Maps domain names (Host header) to lists of backend URLs. Domain routing takes priority over path routing.
+
+```json
+{
+  "domainRoutes": {
+    "app.example.com": [
+      "http://localhost:3000"
+    ],
+    "api.example.com": [
+      "http://localhost:8081",
+      "http://localhost:8082"
+    ],
+    "static.example.com": [
+      "file:///var/www/static"
+    ]
+  }
+}
+```
+
+**How it works:**
+
+1. When a request arrives, JNignx reads the `Host` header
+2. The port is stripped (e.g., `app.example.com:8080` → `app.example.com`)
+3. The domain is matched case-insensitively against `domainRoutes` keys
+4. If a match is found, the request is routed to the configured backend(s)
+5. If no match is found, path-based routing (`routes`) is used as fallback
+
+Domain routes support the same backend URL formats and load balancing strategies as path routes.
+
+See the [Proxy Setup Guide](proxy-setup.md) for detailed domain routing examples.
 
 ---
 

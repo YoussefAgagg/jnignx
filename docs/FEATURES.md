@@ -25,6 +25,30 @@ This document covers each implemented feature in detail, including current capab
 
 ---
 
+## Domain-Based Routing
+
+### Current Implementation
+
+- Routes requests based on the `Host` header to configured backends via the `domainRoutes` config section
+- Domain matching is **case-insensitive** — `App.Example.COM` matches `app.example.com`
+- Automatically **strips port** from the Host header (e.g., `app.example.com:8080` → `app.example.com`)
+- **Priority over path routing** — domain routes are checked first; if no domain matches, path-based routing (`routes`)
+  is used as fallback
+- Each domain supports **multiple backends** with full load balancing (round-robin, weighted, least-connections,
+  IP-hash)
+- Domain route backends are registered with the **health checker** for active and passive monitoring
+- Supports all backend types: HTTP proxy, static file serving (`file://`), and WebSocket proxying
+- Works with **hot-reload** — add or remove domains by editing `routes.json` without restarting
+- See the [Proxy Setup Guide](proxy-setup.md) and [Configuration Reference](configuration.md) for examples
+
+### Remaining Improvements
+
+- **Wildcard Domains** — no support for `*.example.com` patterns; each subdomain must be listed explicitly
+- **Per-Domain TLS (SNI)** — currently all domains share the same TLS certificate; SNI-based cert selection is not
+  implemented
+
+---
+
 ## Load Balancing
 
 ### Current Implementation

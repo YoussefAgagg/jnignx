@@ -11,6 +11,18 @@
       "http://localhost:3000"
     ]
   },
+  "domainRoutes": {
+    "app.example.com": [
+      "http://localhost:3000"
+    ],
+    "api.example.com": [
+      "http://localhost:3001",
+      "http://localhost:3002"
+    ],
+    "static.example.com": [
+      "file:///var/www/static"
+    ]
+  },
   "loadBalancer": "round-robin",
   "backendWeights": {
     "http://localhost:3000": 3,

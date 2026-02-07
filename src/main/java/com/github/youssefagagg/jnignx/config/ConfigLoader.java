@@ -154,6 +154,24 @@ public final class ConfigLoader {
       builder.healthCheckExpectedStatus(expectedStatusMin, expectedStatusMax);
     }
 
+    // Parse domain routes
+    @SuppressWarnings("unchecked")
+    Map<String, Object> domainRoutesObj = (Map<String, Object>) root.get("domainRoutes");
+    if (domainRoutesObj != null) {
+      Map<String, List<String>> domainRoutes = new HashMap<>();
+      for (Map.Entry<String, Object> entry : domainRoutesObj.entrySet()) {
+        Object value = entry.getValue();
+        if (value instanceof List) {
+          @SuppressWarnings("unchecked")
+          List<String> backends = (List<String>) value;
+          domainRoutes.put(entry.getKey().toLowerCase(), backends);
+        } else if (value instanceof String) {
+          domainRoutes.put(entry.getKey().toLowerCase(), List.of((String) value));
+        }
+      }
+      builder.domainRoutes(domainRoutes);
+    }
+
     // Parse backend weights
     @SuppressWarnings("unchecked")
     Map<String, Object> weightsObj = (Map<String, Object>) root.get("backendWeights");
