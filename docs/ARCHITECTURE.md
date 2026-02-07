@@ -1,146 +1,259 @@
-# NanoServer Architecture & Implementation Roadmap
+# Architecture
 
-## 1. Project Goal
-
-Create a high-performance, modern Java clone of **Nginx** (performance, stability) and **Caddy** (usability, automatic
-HTTPS), leveraging the latest JVM features (Java 25 Preview).
-
-## 2. Core Architecture
-
-### 2.1. Threading Model: Virtual Threads (Project Loom)
-
-Unlike Nginx (Event Loop/Worker Processes) or Netty (Reactive/NIO), NanoServer uses a **Thread-per-Connection** model
-powered by **Virtual Threads**.
-
-* **Why:** Virtual threads are lightweight (~1KB) and cheap to create. They allow writing simple, blocking I/O code (
-  easier to maintain) while the JVM handles the underlying non-blocking OS operations (epoll/kqueue) automatically.
-* **Scale:** Can handle millions of concurrent connections similar to Go routines (Caddy).
-
-### 2.2. Memory Management: Foreign Function & Memory API (Project Panama)
-
-Use `java.lang.foreign.MemorySegment` and `Arena` instead of `ByteBuffer`.
-
-* **Off-Heap Storage:** Reduce GC pressure by allocating buffers off-heap.
-* **Zero-Copy:** Use `FileChannel.transferTo()` and `SocketChannel` direct transfers for static files and proxying.
-* **Explicit Deallocation:** Use `Arena.ofConfined()` for request-scoped memory that is automatically freed when the
-  request handling (Virtual Thread) finishes.
-
-### 2.3. Native Compilation: GraalVM
-
-* **Goal:** Instant startup (<50ms) and low memory footprint.
-* **Constraint:** Avoid runtime reflection. Use compile-time generation or handles where possible.
-* **Dependencies:** Keep dependencies to zero or minimal to ensure native image compatibility and small binary size.
+This document describes the internal design and implementation of JNignx.
 
 ---
 
-## 3. Required Features (To Implement)
+## Overview
 
-To achieve parity with Nginx and Caddy, the following components must be implemented:
+JNignx is a reverse proxy built on three pillars of modern Java:
 
-### 3.1. HTTP Protocol Stack
-
-* **HTTP/1.1 (Current):** Enhance `SimpleJsonParser` to a full HTTP parser (Requests, Responses, Chunked Transfer
-  Encoding).
-* **HTTP/2 (Priority):**
-    * Binary framing layer.
-    * Stream multiplexing (multiple requests per connection).
-    * Header compression (HPACK).
-* **HTTP/3 (Future):** Requires QUIC (UDP). Java 25 may have standard API for this, or use FFM to bind to a native QUIC
-  library (e.g., msquic) if standard library is insufficient.
-
-### 3.2. Security & TLS (Caddy-like Features)
-
-* **TLS Termination:** Implement `SSLHandler` using `javax.net.ssl.SSLEngine`.
-    * Must handle `ALPN` (Application-Layer Protocol Negotiation) to support HTTP/2.
-* **Automatic HTTPS (ACME):**
-    * Implement an ACME client (RFC 8555) to talk to Let's Encrypt.
-    * Challenge handling: HTTP-01 (serve specific file) and TLS-ALPN-01.
-    * Certificate storage and automatic renewal.
-
-### 3.3. Static File Server (Nginx-like Features)
-
-* **Zero-Copy Sending:** Use `FileChannel.transferTo` to send files directly from disk to socket without userspace
-  copying.
-* **MIME Types:** Map file extensions to Content-Type.
-* **Caching:** Support `ETag`, `Last-Modified`, and `Cache-Control` headers.
-* **Range Requests:** Support `Range` header for video streaming/resuming downloads.
-* **Compression:** On-the-fly Gzip/Brotli compression for text assets.
-
-### 3.4. Advanced Reverse Proxy
-
-* **Load Balancing Algorithms:**
-    * Round Robin (Implemented).
-    * Least Connections (Needs atomic counter per backend).
-    * IP Hash (Sticky sessions).
-* **Health Checks:** Active (pinging backends) and Passive (monitoring error rates).
-* **Header Manipulation:** Add `X-Real-IP`, `X-Forwarded-For`, `X-Forwarded-Proto`.
-* **WebSockets:** Support upgrading connections and piping data bi-directionally.
-
-### 3.5. Observability
-
-* **Access Logs:** JSON structured logging (Time, Client IP, Path, Status, Duration, User-Agent).
-* **Metrics:** Expose internal counters (Requests/sec, Active Connections, Memory Usage) via a `/metrics` endpoint (
-  Prometheus format).
-
-### 3.6. Configuration
-
-* **Current:** `routes.json`.
-* **Evolution:** Keep JSON for machine readability, but potentially add a "Nanofile" (DSL like Caddyfile) that compiles
-  to JSON for human usability.
-* **Hot Reload:** Continue supporting lock-free configuration swapping (AtomicReference).
+1. **Virtual Threads (Project Loom)** — simple thread-per-connection model that scales to millions of concurrent
+   connections
+2. **Foreign Function & Memory API (Project Panama)** — off-heap buffer allocation that eliminates GC pressure from I/O
+3. **GraalVM Native Image** — ahead-of-time compilation for instant startup and low memory footprint
 
 ---
 
-## 4. Implementation Roadmap
+## Threading Model
 
-### Phase 1: The Core (Foundation)
+Unlike Nginx (event-loop with worker processes) or Netty (reactor pattern with callbacks), JNignx uses a **blocking
+thread-per-connection** model powered by virtual threads.
 
-- [ ] **Robust HTTP/1.1 Parser:** Handle edge cases, headers limits, and body reading (content-length vs chunked).
-- [ ] **Response Writer:** Helper to write responses efficiently using FFM.
-- [ ] **Static File Handler:** Basic file serving with 404/403 handling.
+```
+Client connections
+    │
+    ▼
+┌──────────────┐
+│  ServerLoop   │  Blocking accept() on ServerSocketChannel
+│  (main loop)  │
+└──────┬───────┘
+       │ For each accepted connection:
+       │ Thread.startVirtualThread(new Worker(...))
+       │
+       ▼
+┌──────────────┐  ┌──────────────┐  ┌──────────────┐
+│  Worker VT    │  │  Worker VT    │  │  Worker VT    │  ...millions
+│  (virtual     │  │  (virtual     │  │  (virtual     │
+│   thread)     │  │   thread)     │  │   thread)     │
+└──────────────┘  └──────────────┘  └──────────────┘
+```
 
-### Phase 2: Security (The "Caddy" aspect)
+**Why virtual threads instead of event loops:**
 
-- [ ] **TLS Support:** Integrate `SSLEngine` into the Virtual Thread loop.
-- [ ] **Certificate Loading:** Load PEM/Key files from config.
-
-### Phase 3: Performance & Proxy (The "Nginx" aspect)
-
-- [ ] **Upstream Health Checks.**
-- [ ] **Advanced Load Balancer.**
-- [ ] **Access Logging.**
-
-### Phase 4: Modernization
-
-- [ ] **HTTP/2 Support.**
-- [ ] **Automatic ACME (Let's Encrypt).**
-- [ ] **Compression (Gzip).**
+- Virtual threads cost ~1 KB each (vs ~1 MB for platform threads)
+- Blocking I/O code is straightforward to write and reason about
+- The JVM scheduler automatically multiplexes virtual threads onto carrier (OS) threads
+- No callback chains, no reactive operators, no channel pipelines
 
 ---
 
-## 5. Directory Structure Recommendation
+## Request Pipeline
 
-```text
+Each `Worker` virtual thread processes a single connection through this pipeline:
+
+```
+1. TLS Handshake (if HTTPS)
+         │
+2. Read & Parse HTTP Request (HttpParser)
+         │
+3. CORS Preflight Check
+         │
+4. Rate Limiting Check
+         │
+5. Admin API Check ──────► AdminHandler
+         │
+6. Internal Endpoints ───► /health, /metrics
+         │
+7. Route Resolution ─────► Router → LoadBalancer
+         │
+8. Circuit Breaker Check
+         │
+9. Request Dispatch:
+   ├─ WebSocket Upgrade ─► WebSocketHandler (bidirectional proxy)
+   ├─ Static File ────────► StaticHandler (file:// backends)
+   └─ HTTP Proxy ─────────► ProxyHandler (reverse proxy to backend)
+         │
+10. Access Logging & Metrics Recording
+         │
+11. Keep-Alive Loop (repeat from step 2) or Close
+```
+
+---
+
+## Memory Management
+
+All I/O buffers are allocated off-heap using the Foreign Function & Memory API:
+
+```java
+try (Arena arena = Arena.ofConfined()) {
+    MemorySegment buffer = arena.allocate(8192);
+    ByteBuffer bb = buffer.asByteBuffer();
+    // Use buffer for request/response I/O
+} // Deterministic deallocation — no GC involved
+```
+
+**Benefits:**
+
+- No GC pressure from I/O buffers
+- Deterministic deallocation when the Arena closes
+- Better cache locality for sequential I/O
+
+---
+
+## Key Components
+
+### Package: `core/`
+
+| Class            | Responsibility                                                                                             |
+|------------------|------------------------------------------------------------------------------------------------------------|
+| `ServerLoop`     | Main accept loop; binds `ServerSocketChannel`, spawns `Worker` virtual threads                             |
+| `Worker`         | Full request pipeline: TLS, parsing, routing, CORS, rate limiting, circuit breaking, dispatch              |
+| `Router`         | Route resolution, config loading, hot-reload file watcher, delegates to `LoadBalancer` and `HealthChecker` |
+| `LoadBalancer`   | Backend selection: round-robin (AtomicInteger), least-connections (AtomicLong counters), IP-hash           |
+| `HealthChecker`  | Active health probes (HEAD requests every 10s) + passive tracking from real traffic                        |
+| `RateLimiter`    | Per-client/path rate limiting: token-bucket, sliding-window, fixed-window                                  |
+| `CircuitBreaker` | Per-backend failure tracking with closed → open → half-open state machine                                  |
+
+### Package: `handlers/`
+
+| Class              | Responsibility                                                                                                            |
+|--------------------|---------------------------------------------------------------------------------------------------------------------------|
+| `ProxyHandler`     | Opens `SocketChannel` to backend, reconstructs headers with `X-Forwarded-*`, bidirectional data transfer                  |
+| `StaticHandler`    | Serves files from `file://` backends with MIME detection, directory listings, gzip compression, path-traversal protection |
+| `WebSocketHandler` | Detects `Upgrade: websocket`, performs handshake, relays frames bidirectionally between client and backend                |
+| `AdminHandler`     | REST API for runtime management (health, metrics, routes, circuit breakers, rate limiters)                                |
+
+### Package: `http/`
+
+| Class            | Responsibility                                                               |
+|------------------|------------------------------------------------------------------------------|
+| `HttpParser`     | Parses HTTP/1.1 request line + headers from `MemorySegment`                  |
+| `Request`        | Immutable record: method, path, version, headers, header length, body length |
+| `Response`       | Response builder utility                                                     |
+| `ResponseWriter` | Writes HTTP responses to `SocketChannel`                                     |
+| `CorsConfig`     | CORS policy: allowed origins, methods, headers, credentials, max-age         |
+| `BufferManager`  | Buffer pooling utilities                                                     |
+| `Http2Handler`   | **Stubbed** — frame parser without HPACK; not integrated into pipeline       |
+
+### Package: `tls/`
+
+| Class        | Responsibility                                                            |
+|--------------|---------------------------------------------------------------------------|
+| `SslWrapper` | Wraps `SocketChannel` with `SSLEngine` for TLS termination; supports ALPN |
+| `AcmeClient` | **Skeleton** — placeholder ACME protocol client for Let's Encrypt         |
+
+### Package: `security/`
+
+| Class       | Responsibility                                              |
+|-------------|-------------------------------------------------------------|
+| `AdminAuth` | Admin API authentication: API key, Basic auth, IP whitelist |
+
+### Package: `util/`
+
+| Class              | Responsibility                                                                                   |
+|--------------------|--------------------------------------------------------------------------------------------------|
+| `AccessLogger`     | JSON structured logging to stdout                                                                |
+| `MetricsCollector` | Singleton; collects request counts, latency histograms, byte counters; exports Prometheus format |
+| `CompressionUtil`  | Gzip and deflate compression; Brotli falls back to gzip                                          |
+| `TimeoutManager`   | Connection and request timeout management                                                        |
+
+### Package: `config/`
+
+| Class             | Responsibility                                                                                                               |
+|-------------------|------------------------------------------------------------------------------------------------------------------------------|
+| `ConfigLoader`    | Hand-written JSON parser for `routes.json` (no external dependencies)                                                        |
+| `ConfigValidator` | Validates configuration: URL formats, port ranges, threshold values                                                          |
+| `RouteConfig`     | Route mapping record: path → list of backend URLs                                                                            |
+| `ServerConfig`    | Full server config record: routes, load balancer strategy, rate limiter, circuit breaker, CORS, admin auth, timeouts, limits |
+
+---
+
+## Configuration Hot-Reload
+
+```
+routes.json modified on disk
+        │
+        ▼
+Router.checkAndReload()        ← runs in a virtual thread, polls every 1 second
+        │
+        ▼
+ConfigLoader.load(path)        ← parse new JSON
+        │
+        ▼
+AtomicReference.set(newConfig) ← lock-free swap
+        │
+        ▼
+HealthChecker.start(newBackends) ← register new backends for monitoring
+```
+
+Active requests continue using the old config reference; new requests pick up the new config. No locks, no downtime.
+
+---
+
+## Data Flow: Reverse Proxy
+
+```
+Client ──TCP──► JNignx Worker ──TCP──► Backend Server
+  │                  │                      │
+  │  HTTP Request    │  Reconstructed       │
+  │ ──────────────►  │  Request + Headers   │
+  │                  │ ──────────────────►   │
+  │                  │                      │
+  │                  │  HTTP Response        │
+  │  HTTP Response   │ ◄────────────────    │
+  │ ◄──────────────  │                      │
+```
+
+The `ProxyHandler`:
+
+1. Opens a `SocketChannel` to the backend
+2. Reconstructs request headers, adding `X-Forwarded-For`, `X-Real-IP`, `X-Forwarded-Proto`, updating `Host`
+3. Forwards the request body
+4. Spawns a virtual thread to relay the backend response back to the client
+5. Waits for the response relay to complete
+
+---
+
+## Directory Structure
+
+```
 src/main/java/com/github/youssefagagg/jnignx/
-├── NanoServer.java          # Main Entry
+├── NanoServer.java            # Entry point, CLI argument parsing, startup
 ├── config/
-│   ├── ConfigLoader.java    # JSON/DSL Parser
-│   └── RouteConfig.java     # Config POJOs
+│   ├── ConfigLoader.java      # JSON parser (zero dependencies)
+│   ├── ConfigValidator.java   # Configuration validation
+│   ├── RouteConfig.java       # Route mapping record
+│   └── ServerConfig.java      # Full config record
 ├── core/
-│   ├── ServerLoop.java      # Main Accept Loop
-│   └── Worker.java          # Virtual Thread Logic
-├── http/
-│   ├── HttpParser.java      # HTTP/1.1 & 2 Parser
-│   ├── Request.java
-│   └── Response.java
+│   ├── ServerLoop.java        # Accept loop
+│   ├── Worker.java            # Request pipeline
+│   ├── Router.java            # Routing + hot-reload
+│   ├── LoadBalancer.java      # 3 strategies
+│   ├── HealthChecker.java     # Active + passive checks
+│   ├── RateLimiter.java       # 3 strategies
+│   └── CircuitBreaker.java    # State machine
 ├── handlers/
-│   ├── StaticHandler.java   # File Serving
-│   ├── ProxyHandler.java    # Reverse Proxy
-│   └── ErrorHandler.java
+│   ├── ProxyHandler.java      # Reverse proxy
+│   ├── StaticHandler.java     # File serving
+│   ├── WebSocketHandler.java  # WebSocket relay
+│   └── AdminHandler.java      # Admin REST API
+├── http/
+│   ├── HttpParser.java        # HTTP/1.1 parser
+│   ├── Request.java           # Request record
+│   ├── Response.java          # Response builder
+│   ├── ResponseWriter.java    # Response writer
+│   ├── CorsConfig.java        # CORS policy
+│   ├── BufferManager.java     # Buffer pooling
+│   └── Http2Handler.java      # Stubbed HTTP/2
 ├── tls/
-│   ├── SslWrapper.java      # SSLEngine encapsulation
-│   └── AcmeClient.java      # Let's Encrypt automation
+│   ├── SslWrapper.java        # TLS termination
+│   └── AcmeClient.java        # Skeleton ACME client
+├── security/
+│   └── AdminAuth.java         # Admin authentication
 └── util/
-    ├── MemoryUtils.java     # FFM Helpers
-    └── Logger.java          # Structured Logger
+    ├── AccessLogger.java      # JSON logging
+    ├── MetricsCollector.java   # Prometheus metrics
+    ├── CompressionUtil.java   # Gzip/Deflate compression
+    └── TimeoutManager.java    # Timeout management
 ```

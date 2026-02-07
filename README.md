@@ -1,135 +1,81 @@
-# NanoServer (jnignx) - Java Nginx
+# JNignx — Java Reverse Proxy & Web Server
 
-[![Production Ready](https://img.shields.io/badge/Production-Ready-brightgreen.svg)](docs/production.md)
 [![Java 25](https://img.shields.io/badge/Java-25-orange.svg)](https://openjdk.org/projects/jdk/25/)
-[![Test Coverage](https://img.shields.io/badge/Coverage-85%25-green.svg)](src/test/)
 [![License](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 
-A **production-ready** high-performance Reverse Proxy & Web Server built with Java 25, leveraging modern JVM
-capabilities (Virtual Threads, FFM API) for maximum throughput and minimum latency. Combines the performance of Nginx
-with the usability of Caddy.
+A high-performance reverse proxy and web server built with Java 25, leveraging Virtual Threads (Project Loom) and the
+Foreign Function & Memory API (Project Panama) for high concurrency and low-latency I/O.
 
-> ⚡ **50,000+ req/s** | 🔒 **Enterprise Security** | 📊 **Full Observability** | ✅ **Battle-Tested**
-
-## 🎯 Production Ready Status
-
-✅ **Ready for production deployment** with:
-
-- Enterprise-grade security (TLS, authentication, rate limiting)
-- Comprehensive reliability features (circuit breakers, timeouts, health checks)
-- Full observability (Prometheus metrics, structured logging, admin API)
-- Extensive test coverage (85%+ with critical paths fully tested)
-- Complete production documentation and deployment guides
-
-See [Production Deployment Guide](docs/production.md) for details.
-
-## ✅ Feature Status
-
-### Core & Performance
-
-- [x] **Virtual Threads**: Massive concurrency with Project Loom
-- [x] **Zero-Copy I/O**: Direct buffer transfers (FFM API)
-- [x] **HTTP/1.1 Support**: Full protocol compliance
-- [x] **Hot-Reload Configuration**: Atomic updates with zero downtime
-- [x] **GraalVM Native Image**: AOT compilation support
-
-### Load Balancing
-
-- [x] **Round-Robin Strategy**: Even distribution
-- [x] **Least Connections Strategy**: Adaptive load handling
-- [x] **IP Hash Strategy**: Sticky sessions
-- [x] **Active Health Checks**: Periodic probing
-- [x] **Passive Health Checks**: Real-time failure detection
-- [x] **Automatic Failover/Recovery**: Zero-touch reliability
-
-### Networking & Protocols
-
-- [x] **TLS/HTTPS (1.2/1.3)**: Secure communication
-- [x] **HTTP/2 Support**: Multiplexing via ALPN
-- [x] **WebSocket Proxying**: Transparent bidirectional support
-- [x] **IPv6 Support**: Ready for modern networks
-
-### Observability
-
-- [x] **Structured Logging**: JSON access logs
-- [x] **Prometheus Metrics**: `/metrics` endpoint
-- [x] **Admin API**: Real-time status and management
-- [x] **Real-time Stats**: Live monitoring endpoints
-
-### Security & Reliability
-
-- [x] **Rate Limiting**: Token bucket, sliding window, fixed window
-- [x] **Circuit Breaker**: Preventing cascade failures
-- [x] **Admin API Authentication**: API Key, Basic Auth, IP Whitelist
-- [x] **CORS Support**: Configurable policies
-- [x] **Path Traversal Protection**: Secure static file serving
-- [x] **Input Validation**: Comprehensive config checks
-
-### Static Content
-
-- [x] **Static File Serving**: Efficient delivery
-- [x] **Compression**: Gzip and Brotli support
-- [x] **Directory Listing**: Auto-generated indexes
-- [x] **MIME Type Detection**: Automatic headers
-- [ ] **Range Requests**: Partial content support (Planned)
-
-### Experimental / Roadmap
-
-- [ ] **ACME (Let's Encrypt)**: Automatic cert management (Skeleton implemented)
-- [ ] **Advanced Caching**: TTL and cache control policies
-- [ ] **Middleware**: Request/Response transformation
-- [ ] **Blue/Green Deployment**: Native deployment patterns
+> **Project Status:** JNignx implements the core features needed for a reverse proxy. Some advanced features (HTTP/2,
+> ACME/Let's Encrypt, Brotli) are partially implemented or stubbed.
+> See [Production Readiness](docs/production-readiness.md) for a full gap analysis.
 
 ---
 
-## 🚀 Key Features
+## Feature Status
 
-### Core Architecture
-- **Virtual Threads (Project Loom)**: One virtual thread per connection for massive concurrency
-- **FFM API (Project Panama)**: Off-heap memory allocation to minimize GC pressure
-- **Zero-Copy I/O**: Direct buffer transfers without JVM heap copies
+### Fully Implemented
 
-### Observability
-- **Structured Logging**: JSON access logs with request/response metrics
-- **Prometheus Metrics**: Built-in `/metrics` endpoint
-- **Admin API**: RESTful API for runtime management at `/admin/*`
+- **Reverse Proxy** — HTTP/1.1 request forwarding with `X-Forwarded-For`, `X-Real-IP`, `X-Forwarded-Proto` headers
+- **Virtual Threads** — one virtual thread per connection for massive concurrency
+- **Off-Heap Memory (FFM API)** — `Arena` / `MemorySegment` buffers to reduce GC pressure
+- **Load Balancing** — round-robin, least-connections, IP-hash (sticky sessions)
+- **Health Checking** — active (periodic HEAD probes) and passive (real-traffic failure tracking) with automatic
+  failover and recovery
+- **TLS/HTTPS** — SSL termination via `SSLEngine` with TLS 1.2/1.3 and ALPN negotiation
+- **WebSocket Proxying** — upgrade detection, bidirectional frame-level relay
+- **Rate Limiting** — token-bucket, sliding-window, and fixed-window strategies
+- **Circuit Breaker** — per-backend failure tracking with open/half-open/closed states
+- **CORS** — configurable allowed origins, methods, headers, and preflight handling
+- **Static File Serving** — MIME detection, directory listings, path-traversal protection, gzip/deflate compression
+- **Admin API** — REST endpoints for health, metrics, routes, circuit-breaker and rate-limiter management, protected by
+  API-key/Basic-auth/IP-whitelist
+- **Prometheus Metrics** — `/metrics` endpoint with request counts, latency histograms, connection gauges, byte counters
+- **Structured Logging** — JSON access logs to stdout
+- **Hot-Reload** — file-watch on `routes.json` with atomic `AtomicReference` swap (zero-downtime)
+- **GraalVM Native Image** — compatible (no runtime reflection)
 
-### Security
-- **TLS/HTTPS Support**: Full SSL/TLS termination with SSLEngine
-- **Rate Limiting**: Advanced algorithms to protect your service
-- **Circuit Breaker**: Automatic failure detection and recovery
+### Partially Implemented / Stubbed
 
-## 📋 Requirements
+| Feature              | Status   | Details                                                                                                         |
+|----------------------|----------|-----------------------------------------------------------------------------------------------------------------|
+| HTTP/2               | Stubbed  | Frame parser exists (`Http2Handler`) but lacks HPACK header decoding and is not wired into the request pipeline |
+| ACME (Let's Encrypt) | Skeleton | `AcmeClient` class exists with placeholder methods; no real ACME protocol interaction                           |
+| Brotli Compression   | Fallback | Attempts reflection-based Brotli4j lookup; falls back to gzip when unavailable                                  |
 
-- Java 25 (with preview features enabled)
-- GraalVM (optional, for native compilation)
+### Not Yet Implemented
 
-## 🏗️ Building
+- HTTP/3 (QUIC)
+- Response caching (TTL, `Cache-Control`)
+- Request/response body transformation (middleware pipeline)
+- Range requests (partial content / byte serving)
+- Blue/green deployment patterns
+- Weighted load balancing
+- Configuration DSL ("Nanofile")
+
+---
+
+## Requirements
+
+- **Java 25** with preview features enabled
+- **GraalVM** (optional, for native image compilation)
+
+## Quick Start
 
 ```bash
-# Compile the project
+# Clone and build
+git clone https://github.com/youssefagagg/jnignx.git
+cd jnignx
 ./gradlew build
 
-# Build native image (requires GraalVM)
-./gradlew nativeCompile
-```
-
-## 🚀 Running
-
-```bash
-# Run with default settings (port 8080, routes.json)
+# Run (defaults: port 8080, config routes.json)
 ./gradlew run
 
-# Run with custom port and config
-./gradlew run --args="9090 custom-routes.json"
-
-# Run native binary (after nativeCompile)
-./build/native/nativeCompile/jnignx 8080 routes.json
+# Custom port and config
+./gradlew run --args="9090 routes-full.json"
 ```
 
-## ⚙️ Configuration
-
-Create a `routes.json` file with your routing configuration:
+Create a minimal `routes.json`:
 
 ```json
 {
@@ -148,20 +94,33 @@ Create a `routes.json` file with your routing configuration:
 }
 ```
 
-## 📚 Documentation
+See the [Quick Start Guide](docs/quickstart.md) for detailed setup instructions.
 
-- [**Quick Start Guide**](docs/quickstart.md): Get up and running in minutes.
-- [**Production Guide**](docs/production.md): Deployment, security, and tuning for production.
-- [**Features Guide**](docs/features.md): Deep dive into all capabilities.
-- [**Architecture**](docs/architecture.md): Internal design and implementation details.
-- [**API Reference**](docs/api.md): Admin API and programmatic usage.
-- [**Quick Reference**](docs/quick-reference.md): Handy cheat sheet for config and commands.
+---
 
-## 🤝 Contributing
+## Documentation
 
-Contributions are welcome! We aim to be the best Java-based reverse proxy.
+| Document                                             | Description                                                      |
+|------------------------------------------------------|------------------------------------------------------------------|
+| [Quick Start Guide](docs/quickstart.md)              | Installation, first run, basic configuration                     |
+| [Configuration Reference](docs/configuration.md)     | All `routes.json` options explained                              |
+| [Features Guide](docs/features.md)                   | Deep dive into each implemented feature and what can be improved |
+| [Architecture](docs/architecture.md)                 | Internal design, threading model, memory management              |
+| [Admin API Reference](docs/api.md)                   | REST endpoints for runtime management                            |
+| [Production Readiness](docs/production-readiness.md) | Gap analysis, deployment guide, what's needed for production     |
 
-## 📜 License
+---
+
+## Contributing
+
+Contributions are welcome! Priority areas:
+
+1. Complete HTTP/2 support (HPACK decoding, stream multiplexing integration)
+2. Implement real ACME client for automatic HTTPS
+3. Add response caching
+4. Add chunked transfer encoding support
+5. Improve test coverage for edge cases
+
+## License
 
 MIT License
-

@@ -1,160 +1,288 @@
-# NanoServer Features Documentation
+# Features Guide
 
-This document provides detailed information about all features implemented in NanoServer, comparing them with Nginx and
-Caddy.
+This document covers each implemented feature in detail, including current capabilities and areas for improvement.
 
-## Table of Contents
+---
 
-1. [Load Balancing](#load-balancing)
-2. [Health Checking](#health-checking)
-3. [Observability](#observability)
-4. [Security](#security)
-5. [Static File Serving](#static-file-serving)
-6. [Hot Reloading](#hot-reloading)
-7. [Performance Features](#performance-features)
+## Reverse Proxy
+
+### Current Implementation
+
+- HTTP/1.1 request forwarding via raw `SocketChannel` connections
+- Header reconstruction: replaces `Host`, adds `X-Forwarded-For`, `X-Real-IP`, `X-Forwarded-Proto`
+- Body forwarding for requests with `Content-Length`
+- Backend response relay runs in a separate virtual thread for non-blocking bidirectional transfer
+- Buffers allocated off-heap with FFM API (`Arena` / `MemorySegment`)
+
+### Improvements Needed
+
+- **Chunked Transfer Encoding** — the HTTP parser does not handle `Transfer-Encoding: chunked` requests or responses;
+  only `Content-Length`-based bodies are forwarded correctly
+- **Connection Pooling** — each request opens a new `SocketChannel` to the backend; reusing connections would
+  significantly reduce latency
+- **Retry Logic** — failed proxy attempts are not retried on alternate backends
+- **Request Buffering** — large request bodies are not streamed; the entire initial buffer must fit in the 8 KB
+  allocation
+- **Error Responses** — when a backend connection fails, the client does not always receive a proper 502 Bad Gateway
+  response
 
 ---
 
 ## Load Balancing
 
-NanoServer implements three load balancing strategies, matching and exceeding basic Nginx/Caddy capabilities.
+### Current Implementation
 
-### 1. Round-Robin (Default)
+Three strategies are available, configured via the `loadBalancer` field:
 
-Distributes requests evenly across all healthy backends in a circular fashion.
+| Strategy          | Algorithm                                   | Use Case                   |
+|-------------------|---------------------------------------------|----------------------------|
+| Round-Robin       | `AtomicInteger` counter mod backend count   | Uniform workloads          |
+| Least Connections | `AtomicLong` per-backend connection counter | Variable request durations |
+| IP Hash           | `clientIp.hashCode() % backends.size()`     | Sticky sessions            |
 
-**Use Case**: When all backends have similar capacity and request processing times.
+All strategies filter out unhealthy backends before selection, falling back to all backends if none are healthy.
 
-**Implementation**:
+### Improvements Needed
 
-```java
-// Round-robin is the default strategy
-Router router = new Router(configPath);
-```
-
-**Comparison**:
-
-- ✅ Nginx: Supported (default)
-- ✅ Caddy: Supported (default)
-- ✅ NanoServer: Supported (default) with lock-free AtomicInteger
-
-### 2. Least Connections
-
-Routes requests to the backend with the fewest active connections.
-
-**Use Case**: When requests have variable processing times or backends have different capacities.
-
-**Implementation**:
-
-```java
-Router router = new Router(configPath, LoadBalancer.Strategy.LEAST_CONNECTIONS);
-```
-
-**Comparison**:
-
-- ✅ Nginx: Supported (requires `least_conn` directive)
-- ✅ Caddy: Supported (via `lb_policy least_conn`)
-- ✅ NanoServer: Supported with real-time connection tracking
-
-### 3. IP Hash (Sticky Sessions)
-
-Uses consistent hashing based on client IP to ensure the same client always hits the same backend.
-
-**Use Case**: Session persistence without external session storage.
-
-**Implementation**:
-
-```java
-Router router = new Router(configPath, LoadBalancer.Strategy.IP_HASH);
-```
-
-**Comparison**:
-
-- ✅ Nginx: Supported (via `ip_hash` directive)
-- ✅ Caddy: Supported (via `lb_policy ip_hash`)
-- ✅ NanoServer: Supported with efficient hash-based routing
-
-### Configuration Example
-
-```json
-{
-  "routes": {
-    "/api": [
-      "http://backend1:3000",
-      "http://backend2:3000",
-      "http://backend3:3000"
-    ]
-  }
-}
-```
-
-All three backends will be used according to the selected strategy, with automatic health checking.
+- **Weighted Round-Robin** — no support for assigning different weights to backends with different capacities
+- **Configurable Strategy per Route** — currently one global strategy; different routes may benefit from different
+  strategies
+- **Slow Start** — newly recovered backends receive full traffic immediately instead of being ramped up gradually
 
 ---
 
 ## Health Checking
 
-NanoServer implements both active and passive health checking, similar to Nginx Plus and Caddy.
+### Current Implementation
 
-### Active Health Checks
+**Active checks:**
 
-Periodic HTTP HEAD requests to verify backend availability.
+- Sends `HEAD /` to each HTTP backend at a configurable interval (default: 10 seconds)
+- Backends marked unhealthy after N consecutive failures (default: 3)
+- Backends marked healthy after N consecutive successes (default: 2)
+- `file://` backends are skipped
+- Runs in background virtual threads
 
-**Configuration**:
+**Passive checks:**
 
-- Check Interval: 10 seconds (configurable)
-- Timeout: 5 seconds (configurable)
-- Failure Threshold: 3 consecutive failures → mark unhealthy
-- Success Threshold: 2 consecutive successes → mark healthy
+- `Router.recordProxySuccess()` / `recordProxyFailure()` called after each real request
+- Failure counts feed into the `HealthChecker.BackendHealth` state
 
-**Features**:
+### Improvements Needed
 
-- ✅ Automatic backend removal when unhealthy
-- ✅ Automatic recovery when backends become healthy
-- ✅ Runs in background virtual threads (zero overhead)
-- ✅ Skip health checks for file:// backends
-
-### Passive Health Checks
-
-Monitors actual proxy requests and marks backends as unhealthy based on real traffic failures.
-
-**Features**:
-
-- ✅ Tracks consecutive failures from real requests
-- ✅ Fast circuit breaker for known-bad backends
-- ✅ Combined with active checks for comprehensive monitoring
-
-### Comparison
-
-| Feature               | Nginx | Nginx Plus | Caddy | NanoServer |
-|-----------------------|-------|------------|-------|------------|
-| Active Health Checks  | ❌     | ✅          | ✅     | ✅          |
-| Passive Health Checks | ✅     | ✅          | ✅     | ✅          |
-| Automatic Recovery    | ❌     | ✅          | ✅     | ✅          |
-| Zero Downtime         | ❌     | ✅          | ✅     | ✅          |
-| Cost                  | Free  | Paid       | Free  | Free       |
-
-### Health Status Monitoring
-
-Health status is visible in logs:
-
-```
-[HealthChecker] ✓ http://localhost:3000 is healthy
-[HealthChecker] ✗ http://localhost:3001 failed: Connection refused
-[HealthChecker] Started monitoring 3 backends
-```
+- **Configurable Health Check Path** — currently hardcoded to `HEAD /`; backends may expose health at `/healthz` or
+  `/ready`
+- **Expected Status Codes** — any non-exception response is considered healthy; should support configuring expected
+  status codes (e.g., 200-299)
+- **Health Check via Config** — health check parameters are partially configurable via JSON but the `HealthChecker`
+  class uses hardcoded constants rather than reading from `ServerConfig`
 
 ---
 
-## Observability
+## TLS/HTTPS
 
-NanoServer provides enterprise-grade observability features comparable to Caddy and Nginx Plus.
+### Current Implementation
 
-### 1. Structured Access Logs
+- SSL termination using `javax.net.ssl.SSLEngine`
+- Supports TLS 1.2 and TLS 1.3
+- ALPN protocol negotiation (advertises `h2` and `http/1.1`)
+- Loads certificates from PKCS12 or JKS keystores
+- `SslWrapper.SslSession` provides `read()`, `write()`, `doHandshake()`, `close()`, `getNegotiatedProtocol()`
 
-JSON-formatted access logs for easy parsing and analysis.
+### Improvements Needed
 
-**Format**:
+- **PEM Certificate Loading** — only Java KeyStore formats are supported; direct PEM/key file loading would be more
+  convenient
+- **SNI (Server Name Indication)** — no support for serving different certificates based on hostname
+- **OCSP Stapling** — not implemented
+- **Certificate Rotation** — replacing certificates requires server restart; hot-reload of TLS config is not supported
+- **ACME/Let's Encrypt** — `AcmeClient` exists but is a skeleton with placeholder methods; all core ACME operations (
+  account registration, order creation, challenge completion, certificate download) return hardcoded strings
+
+---
+
+## WebSocket Proxying
+
+### Current Implementation
+
+- Detects WebSocket upgrade requests (`Upgrade: websocket`, `Connection: Upgrade`)
+- Validates `Sec-WebSocket-Key` and generates `Sec-WebSocket-Accept`
+- Forwards the upgrade request to the backend
+- Bidirectional frame relay: reads WebSocket frames from one side and writes to the other
+- Handles frame opcodes: text, binary, close, ping, pong
+- Supports masked and unmasked frames
+
+### Improvements Needed
+
+- **Frame Fragmentation** — continuation frames are not reassembled
+- **Per-Message Compression** — `permessage-deflate` extension is not supported
+- **Subprotocol Negotiation** — `Sec-WebSocket-Protocol` is not forwarded/negotiated
+- **Ping/Pong Keepalive** — no periodic ping to detect dead connections
+
+---
+
+## Rate Limiting
+
+### Current Implementation
+
+Three strategies available, configured via the `rateLimiter` section:
+
+| Strategy       | Description                                                          |
+|----------------|----------------------------------------------------------------------|
+| Token Bucket   | Tokens refill at a steady rate; bursts allowed up to bucket capacity |
+| Sliding Window | Counts requests in a moving time window                              |
+| Fixed Window   | Counts requests in fixed time intervals                              |
+
+Rate limiting is applied per client IP and path. Clients exceeding the limit receive `429 Too Many Requests`.
+
+### Improvements Needed
+
+- **Per-Route Rate Limits** — currently one global rate limit; different routes may need different limits
+- **Response Headers** — `X-RateLimit-Limit`, `X-RateLimit-Remaining`, `X-RateLimit-Reset` headers are not included in
+  responses
+- **Distributed Rate Limiting** — state is in-memory only; not shared across multiple JNignx instances
+- **Configurable Key** — rate limiting is keyed on client IP; should support keying on headers (e.g., API key) or other
+  attributes
+
+---
+
+## Circuit Breaker
+
+### Current Implementation
+
+Per-backend circuit breaker with three states:
+
+| State     | Behavior                                                 |
+|-----------|----------------------------------------------------------|
+| Closed    | Requests pass through; failures are counted              |
+| Open      | Requests immediately fail with `503 Service Unavailable` |
+| Half-Open | Limited requests pass through to test recovery           |
+
+Transitions:
+
+- Closed → Open: after N consecutive failures (configurable `failureThreshold`)
+- Open → Half-Open: after timeout period
+- Half-Open → Closed: after successful test request
+- Half-Open → Open: after failed test request
+
+### Improvements Needed
+
+- **Shared State** — each `Worker` creates its own `CircuitBreaker` instance; circuit state is not shared across
+  connections, reducing effectiveness
+- **Admin API Integration** — `/admin/circuits` endpoint returns empty data; should report actual circuit states for all
+  backends
+- **Metrics** — circuit breaker state changes are not recorded in metrics
+
+---
+
+## CORS
+
+### Current Implementation
+
+- Configurable allowed origins, methods, headers, credentials, and max-age
+- Automatic `OPTIONS` preflight response handling
+- Origin validation against whitelist
+- CORS headers added to all responses when enabled
+
+### Improvements Needed
+
+- **Wildcard Origins** — no support for `*` or pattern-based origin matching
+- **Per-Route CORS** — one global CORS policy; different routes may need different policies
+- **CORS Headers on Error Responses** — CORS headers are not always added to error responses (e.g., 502, 503)
+
+---
+
+## Static File Serving
+
+### Current Implementation
+
+- Serves files from `file://` backend paths
+- Automatic MIME type detection for common types (HTML, CSS, JS, JSON, images, etc.)
+- Auto-generated directory listings when no `index.html` is present
+- Gzip compression for text-based content types when client sends `Accept-Encoding: gzip`
+- Path traversal protection (blocks `..` in paths, validates resolved path stays under root)
+
+### Improvements Needed
+
+- **Range Requests** — `Range` header is not supported; needed for video streaming and download resumption
+- **Cache Headers** — `ETag` and `Last-Modified` headers are not generated; `If-None-Match`/`If-Modified-Since`
+  conditional requests are not handled
+- **Brotli Compression** — falls back to gzip; real Brotli requires adding the Brotli4j dependency
+- **Custom Error Pages** — 404 and 403 responses use hardcoded HTML; no support for custom error pages
+
+---
+
+## Admin API
+
+### Current Implementation
+
+REST endpoints at `/admin/*`, protected by API key, Basic auth, and/or IP whitelist:
+
+| Endpoint                 | Method | Description                                           |
+|--------------------------|--------|-------------------------------------------------------|
+| `/admin/health`          | GET    | Server health status (uptime, version)                |
+| `/admin/metrics`         | GET    | Prometheus-format metrics                             |
+| `/admin/stats`           | GET    | Server statistics (memory, threads, request counts)   |
+| `/admin/routes`          | GET    | Current route configuration                           |
+| `/admin/routes/reload`   | POST   | Reload configuration from disk                        |
+| `/admin/circuits`        | GET    | Circuit breaker status                                |
+| `/admin/circuits/reset`  | POST   | Reset circuit breakers. Query param: `?backend=<url>` |
+| `/admin/ratelimit`       | GET    | Rate limiter status                                   |
+| `/admin/ratelimit/reset` | POST   | Reset rate limiters                                   |
+| `/admin/config`          | GET    | Server feature list                                   |
+| `/admin/config/update`   | POST   | **Not implemented** — returns error                   |
+
+### Improvements Needed
+
+- **Circuit Breaker Status** — `/admin/circuits` returns an empty list instead of actual circuit states
+- **Rate Limiter Status** — `/admin/ratelimit` returns hardcoded placeholder data
+- **Config Update** — `/admin/config/update` is not implemented
+- **Response Status Codes** — all responses return `200 OK` even for errors; should use `400`, `404`, `405`
+  appropriately
+- **Backend Health in API** — no endpoint to view individual backend health status
+- **Request Body Parsing** — POST endpoints don't fully parse request bodies for parameters
+
+---
+
+## Prometheus Metrics
+
+### Current Implementation
+
+`/metrics` endpoint exports Prometheus text format:
+
+```
+nanoserver_uptime_seconds
+nanoserver_requests_total
+nanoserver_requests_by_status{status="200"}
+nanoserver_requests_by_path{path="/api"}
+nanoserver_active_connections
+nanoserver_bytes_received_total
+nanoserver_bytes_sent_total
+nanoserver_request_duration_ms_bucket{le="10"}
+nanoserver_request_duration_ms_bucket{le="50"}
+nanoserver_request_duration_ms_bucket{le="100"}
+nanoserver_request_duration_ms_bucket{le="500"}
+nanoserver_request_duration_ms_bucket{le="1000"}
+nanoserver_request_duration_ms_bucket{le="+Inf"}
+nanoserver_request_duration_ms_sum
+nanoserver_request_duration_ms_count
+```
+
+### Improvements Needed
+
+- **Backend-Specific Metrics** — no per-backend request counts, latency, or error rates
+- **Circuit Breaker Metrics** — state changes not exported
+- **Rate Limiter Metrics** — rejected requests not broken out
+- **Connection Duration** — not tracked
+- **`bytes_sent`** — often recorded as 0 because response size is not captured from the proxy relay
+
+---
+
+## Structured Logging
+
+### Current Implementation
+
+JSON-formatted access logs to stdout:
 
 ```json
 {
@@ -172,400 +300,51 @@ JSON-formatted access logs for easy parsing and analysis.
 }
 ```
 
-**Benefits**:
+Also supports error and info log types.
 
-- Easy integration with ELK, Splunk, Datadog
-- Structured querying and analysis
-- No need for log parsing regex
+### Improvements Needed
 
-### 2. Prometheus Metrics
-
-Built-in `/metrics` endpoint exposing Prometheus-compatible metrics.
-
-**Metrics Provided**:
-
-```
-# Server Uptime
-nanoserver_uptime_seconds
-
-# Request Metrics
-nanoserver_requests_total
-nanoserver_requests_by_status{status="200"}
-nanoserver_requests_by_path{path="/api/users"}
-
-# Connection Metrics
-nanoserver_active_connections
-
-# Performance Metrics
-nanoserver_request_duration_ms_bucket{le="10"}
-nanoserver_request_duration_ms_bucket{le="50"}
-nanoserver_request_duration_ms_bucket{le="100"}
-nanoserver_request_duration_ms_sum
-nanoserver_request_duration_ms_count
-
-# Data Transfer
-nanoserver_bytes_received_total
-nanoserver_bytes_sent_total
-```
-
-**Integration**:
-
-```yaml
-# prometheus.yml
-scrape_configs:
-  - job_name: 'nanoserver'
-    static_configs:
-      - targets: ['localhost:8080']
-    metrics_path: '/metrics'
-```
-
-### 3. Real-time Monitoring
-
-Access metrics endpoint to see live statistics:
-
-```bash
-curl http://localhost:8080/metrics
-```
-
-### Comparison
-
-| Feature         | Nginx | Nginx Plus | Caddy | NanoServer   |
-|-----------------|-------|------------|-------|--------------|
-| Access Logs     | ✅     | ✅          | ✅     | ✅ JSON       |
-| Metrics Export  | ❌     | ✅          | ✅     | ✅ Prometheus |
-| Real-time Stats | ❌     | ✅          | ❌     | ✅            |
-| Zero Config     | ❌     | ❌          | ✅     | ✅            |
+- **Log to File** — currently stdout only; should support configurable file output and rotation
+- **Log Level Configuration** — no way to control log verbosity
+- **Request ID / Trace ID** — no correlation ID for tracing requests across the proxy and backend
 
 ---
 
-## Security
+## Hot-Reload Configuration
 
-NanoServer implements security features matching modern reverse proxies.
+### Current Implementation
 
-### 1. X-Forwarded Headers
+- File watcher polls `routes.json` every 1 second for modifications
+- Uses `AtomicReference` for lock-free config swap
+- Active requests use old config; new requests use updated config
+- New backends are registered for health checking on reload
 
-Automatically adds standard proxy headers:
+### Improvements Needed
 
-**Headers Added**:
-
-- `X-Forwarded-For`: Client's real IP address
-- `X-Real-IP`: Client's IP (duplicate for compatibility)
-- `X-Forwarded-Proto`: Original protocol (http/https)
-- `Host`: Backend hostname
-
-**Example**:
-
-```
-GET /api/users HTTP/1.1
-Host: backend.local
-X-Forwarded-For: 192.168.1.100
-X-Real-IP: 192.168.1.100
-X-Forwarded-Proto: http
-```
-
-**Benefits**:
-
-- Backend apps see real client IP
-- Proper protocol detection for redirects
-- Standard compliance
-
-### 2. TLS/HTTPS Support
-
-SSL/TLS termination using Java's SSLEngine.
-
-**Features**:
-
-- ✅ TLS 1.2 and 1.3 support
-- ✅ ALPN for HTTP/2 negotiation
-- ✅ Certificate loading from keystore
-- ✅ Virtual thread compatible (non-blocking)
-
-**Usage**:
-
-```java
-SslWrapper ssl = new SslWrapper("keystore.p12", "password");
-SslWrapper.SslSession session = ssl.wrap(clientChannel);
-session.
-
-doHandshake();
-```
-
-### 3. Path Traversal Protection
-
-Static file handler includes security checks:
-
-```java
-// Blocks requests containing ".."
-if(requestPath.contains("..")){
-
-sendError(clientChannel, 403,"Forbidden");
-    return;
-        }
-
-// Ensures resolved path is under root
-        if(!file.
-
-startsWith(root)){
-
-sendError(clientChannel, 403,"Forbidden");
-    return;
-        }
-```
-
-### Comparison
-
-| Feature             | Nginx    | Caddy  | NanoServer |
-|---------------------|----------|--------|------------|
-| X-Forwarded Headers | ✅ Manual | ✅ Auto | ✅ Auto     |
-| TLS Termination     | ✅        | ✅      | ✅          |
-| Auto HTTPS          | ❌        | ✅      | 🚧 Roadmap |
-| Path Protection     | ✅        | ✅      | ✅          |
+- **Validation Before Swap** — invalid config could be loaded; `ConfigValidator` exists but its integration with the
+  reload path should be verified
+- **Reload Notification** — no webhook or event mechanism to notify of reload success/failure
+- **Partial Reload** — all configuration is reloaded; no way to update just routes without re-reading the entire file
 
 ---
 
-## Static File Serving
+## HTTP/2 (Stubbed)
 
-NanoServer includes a feature-rich static file server using zero-copy I/O.
+### Current State
 
-### Features
+`Http2Handler` exists with:
 
-1. **Zero-Copy Transfer**: Uses `FileChannel.transferTo()` for efficient file serving
-2. **MIME Type Detection**: Automatic content-type headers
-3. **Directory Listing**: Auto-generated HTML indexes
-4. **Gzip Compression**: On-the-fly compression for text files
-5. **Cache Headers**: `ETag` and `Last-Modified` support
-6. **Range Requests**: Partial content support (future)
+- Binary frame reading/writing (9-byte header + payload)
+- Frame type handling: SETTINGS, HEADERS, DATA, WINDOW_UPDATE, PING, GOAWAY, RST_STREAM
+- Stream management (`Http2Stream` objects)
+- Settings negotiation (SETTINGS frame exchange)
 
-### Configuration
+### What's Missing to Complete
 
-```json
-{
-  "routes": {
-    "/static": [
-      "file:///var/www/html"
-    ],
-    "/assets": [
-      "file:///Users/user/assets"
-    ]
-  }
-}
-```
-
-### MIME Types Supported
-
-- HTML, CSS, JavaScript
-- JSON, XML
-- Images: PNG, JPEG, GIF, SVG
-- Plain text
-
-### Directory Listing Example
-
-When accessing a directory without index.html:
-
-```html
-<!DOCTYPE html>
-<html>
-<head><title>Index of /assets/</title></head>
-<body>
-  <h1>Index of /assets/</h1>
-  <ul>
-    <li><a href="../">../</a></li>
-    <li><a href="image.png">image.png</a> (12345 bytes)</li>
-    <li><a href="styles/">styles/</a></li>
-  </ul>
-</body>
-</html>
-```
-
-### Compression
-
-Automatically compresses compressible MIME types:
-
-- text/html, text/plain, text/css
-- application/javascript, application/json
-- image/svg+xml
-
-Only when client sends `Accept-Encoding: gzip` header.
-
----
-
-## Hot Reloading
-
-Configuration changes are applied without server restart.
-
-### How It Works
-
-1. **File Monitoring**: Checks `routes.json` every second
-2. **Atomic Swap**: Uses `AtomicReference` for lock-free updates
-3. **Zero Downtime**: Active requests use old config, new requests use new config
-4. **Health Check Update**: Re-registers new backends for monitoring
-
-### Example
-
-```bash
-# Server is running...
-[Router] Loaded configuration from routes.json
-
-# Edit routes.json to add a backend
-vim routes.json
-
-# Automatically detected and reloaded (within 1 second)
-[Router] Configuration reloaded!
-[Router] Old routes: [/api, /static]
-[Router] New routes: [/api, /static, /admin]
-[HealthChecker] Started monitoring new backend: http://localhost:4000
-```
-
-### Comparison
-
-| Feature        | Nginx    | Caddy     | NanoServer |
-|----------------|----------|-----------|------------|
-| Hot Reload     | ✅ Signal | ✅ Auto    | ✅ Auto     |
-| Zero Downtime  | ✅        | ✅         | ✅          |
-| Detection      | Manual   | Auto      | Auto       |
-| Check Interval | N/A      | Immediate | 1 second   |
-
----
-
-## Performance Features
-
-### 1. Virtual Threads
-
-**Benefits**:
-
-- Millions of concurrent connections
-- Simple blocking code style
-- Automatic non-blocking I/O
-
-**Memory Comparison**:
-
-- Platform Thread: ~1MB per thread
-- Virtual Thread: ~1KB per thread
-- 10,000 connections: 10GB vs 10MB
-
-### 2. Zero-Copy I/O
-
-**Traditional Approach** (4 copies):
-
-```
-Disk → Kernel → JVM Heap → Kernel → Network
-```
-
-**Zero-Copy Approach** (2 copies):
-
-```
-Disk → Kernel → Network
-```
-
-**Implementation**:
-
-```java
-FileChannel fileChannel = FileChannel.open(file, StandardOpenOption.READ);
-long transferred = fileChannel.transferTo(0, fileChannel.size(), socketChannel);
-```
-
-### 3. Off-Heap Memory (FFM)
-
-**Benefits**:
-
-- No GC pressure from I/O buffers
-- Deterministic deallocation
-- Better cache locality
-
-**Implementation**:
-
-```java
-try(Arena arena = Arena.ofConfined()){
-MemorySegment buffer = arena.allocate(8192);
-ByteBuffer bb = buffer.asByteBuffer();
-// Use buffer...
-} // Automatically freed
-```
-
-### 4. Lock-Free Data Structures
-
-**Load Balancing Counters**:
-
-```java
-AtomicInteger counter = new AtomicInteger();
-int index = counter.getAndIncrement() % backends.size();
-```
-
-**Configuration Updates**:
-
-```java
-AtomicReference<RouteConfig> configRef = new AtomicReference<>();
-configRef.
-
-set(newConfig); // Atomic swap
-```
-
-### Performance Comparison
-
-| Metric          | Nginx (C) | Caddy (Go) | NanoServer (Java 25) |
-|-----------------|-----------|------------|----------------------|
-| Memory/Conn     | ~1KB      | ~4KB       | ~1KB                 |
-| Startup Time    | <100ms    | <100ms     | <100ms (native)      |
-| Max Connections | Millions  | Millions   | Millions             |
-| GC Pauses       | N/A       | 1-10ms     | <1ms (off-heap)      |
-| Code Style      | Callback  | Sequential | Sequential           |
-
----
-
-## Feature Matrix
-
-Comprehensive comparison with Nginx and Caddy:
-
-| Feature            | Nginx    | Nginx Plus | Caddy        | NanoServer   |
-|--------------------|----------|------------|--------------|--------------|
-| **Load Balancing** |
-| Round Robin        | ✅        | ✅          | ✅            | ✅            |
-| Least Connections  | ✅        | ✅          | ✅            | ✅            |
-| IP Hash            | ✅        | ✅          | ✅            | ✅            |
-| **Health Checks**  |
-| Passive            | ✅        | ✅          | ✅            | ✅            |
-| Active             | ❌        | ✅          | ✅            | ✅            |
-| Auto Recovery      | ❌        | ✅          | ✅            | ✅            |
-| **Observability**  |
-| Access Logs        | ✅        | ✅          | ✅            | ✅ JSON       |
-| Metrics            | ❌        | ✅          | ✅            | ✅ Prometheus |
-| Real-time Stats    | ❌        | ✅          | ❌            | ✅            |
-| **Security**       |
-| TLS/HTTPS          | ✅        | ✅          | ✅            | ✅            |
-| Auto HTTPS         | ❌        | ❌          | ✅            | 🚧           |
-| X-Forwarded        | ✅ Manual | ✅ Manual   | ✅ Auto       | ✅ Auto       |
-| **Config**         |
-| Hot Reload         | ✅ Signal | ✅ Signal   | ✅ Auto       | ✅ Auto       |
-| Zero Downtime      | ✅        | ✅          | ✅            | ✅            |
-| **Performance**    |
-| Zero-Copy I/O      | ✅        | ✅          | ✅            | ✅            |
-| Virtual Threads    | N/A      | N/A        | ✅ Goroutines | ✅ Virtual    |
-| Native Image       | N/A      | N/A        | ✅            | ✅            |
-| **Cost**           |
-| License            | Free     | Paid       | Free         | Free         |
-
-**Legend**:
-
-- ✅ Fully supported
-- 🚧 In roadmap
-- ❌ Not supported
-- N/A Not applicable
-
----
-
-## Future Enhancements
-
-See [ARCHITECTURE.md](ARCHITECTURE.md) for the complete roadmap.
-
-Planned features:
-
-1. HTTP/2 support with ALPN
-2. Automatic HTTPS via Let's Encrypt (ACME)
-3. WebSocket proxying
-4. Brotli compression
-5. Rate limiting
-6. Circuit breaker patterns
-7. Admin API for runtime configuration
-8. Request/Response body manipulation
-9. Advanced routing (regex, headers)
-10. Blue-green deployment support
+- **HPACK Header Compression** — `receiveHeaders()` is empty; no HPACK encoder/decoder
+- **Pipeline Integration** — `Http2Handler` is never instantiated by `Worker`; ALPN negotiation in `SslWrapper` detects
+  `h2` but doesn't route to `Http2Handler`
+- **Stream Multiplexing** — frame dispatch to Request objects is not connected
+- **Flow Control** — window update handling exists but is incomplete
+- **Server Push** — `createStream()` exists but is not connected to anything
+- **Priority/Dependency** — not implemented
