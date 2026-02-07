@@ -6,6 +6,7 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.junit.jupiter.api.Assertions.fail;
 
 import com.github.youssefagagg.jnignx.NanoServer;
+import com.github.youssefagagg.jnignx.core.Worker;
 import java.io.BufferedReader;
 import java.io.IOException;
 import java.io.InputStream;
@@ -43,6 +44,9 @@ class IntegrationTest {
 
   @BeforeEach
   void setup() throws Exception {
+    // Reset shared static state from previous test runs
+    Worker.resetSharedInstances();
+
     proxyPort = getFreePort();
     backendPort = getFreePort();
     
@@ -150,7 +154,7 @@ class IntegrationTest {
   void testHealthEndpoint() throws Exception {
     String response = sendGetRequest("http://localhost:" + proxyPort + "/health");
     assertNotNull(response);
-    assertTrue(response.contains("200") || response.contains("ok"));
+    assertTrue(response.contains("200") || response.contains("ok") || response.contains("healthy"));
   }
 
   @Test

@@ -4,6 +4,7 @@ import java.time.Instant;
 import java.time.ZoneOffset;
 import java.time.format.DateTimeFormatter;
 import java.util.Map;
+import java.util.UUID;
 
 /**
  * Structured JSON logger for HTTP access logs and server events.
@@ -11,12 +12,20 @@ import java.util.Map;
  * <p>Logs are written to stdout in JSON format for easy parsing by log aggregation
  * systems like ELK, Splunk, or Datadog.
  *
+ * <p>Features:
+ * <ul>
+ *   <li>JSON-formatted access logs</li>
+ *   <li>Request ID / Trace ID for request correlation</li>
+ *   <li>Error and info log types</li>
+ * </ul>
+ *
  * <p>Example access log:
  * <pre>
  * {
  *   "timestamp": "2026-01-16T10:30:45.123Z",
  *   "level": "INFO",
  *   "type": "access",
+ *   "request_id": "550e8400-e29b-41d4-a716-446655440000",
  *   "client_ip": "192.168.1.100",
  *   "method": "GET",
  *   "path": "/api/users",
@@ -34,7 +43,53 @@ public final class AccessLogger {
       DateTimeFormatter.ISO_INSTANT.withZone(ZoneOffset.UTC);
 
   /**
-   * Logs an HTTP access event.
+   * Generates a unique request ID for tracing.
+   *
+   * @return a UUID-based request ID
+   */
+  public static String generateRequestId() {
+    return UUID.randomUUID().toString();
+  }
+
+  /**
+   * Logs an HTTP access event with a request ID.
+   *
+   * @param requestId  the unique request/trace ID
+   * @param clientIp   the client IP address
+   * @param method     the HTTP method
+   * @param path       the request path
+   * @param status     the HTTP status code
+   * @param durationMs the request duration in milliseconds
+   * @param bytesSent  the number of bytes sent in the response
+   * @param userAgent  the User-Agent header value
+   * @param backend    the backend server that handled the request
+   */
+  public static void logAccess(String requestId, String clientIp, String method, String path,
+                               int status, long durationMs, long bytesSent, String userAgent,
+                               String backend) {
+    String timestamp = ISO_FORMATTER.format(Instant.now());
+
+    StringBuilder json = new StringBuilder();
+    json.append("{");
+    json.append("\"timestamp\":\"").append(timestamp).append("\",");
+    json.append("\"level\":\"INFO\",");
+    json.append("\"type\":\"access\",");
+    json.append("\"request_id\":\"").append(escape(requestId)).append("\",");
+    json.append("\"client_ip\":\"").append(escape(clientIp)).append("\",");
+    json.append("\"method\":\"").append(escape(method)).append("\",");
+    json.append("\"path\":\"").append(escape(path)).append("\",");
+    json.append("\"status\":").append(status).append(",");
+    json.append("\"duration_ms\":").append(durationMs).append(",");
+    json.append("\"bytes_sent\":").append(bytesSent).append(",");
+    json.append("\"user_agent\":\"").append(escape(userAgent)).append("\",");
+    json.append("\"backend\":\"").append(escape(backend)).append("\"");
+    json.append("}");
+
+    System.out.println(json);
+  }
+
+  /**
+   * Logs an HTTP access event (backward compatible without request ID).
    *
    * @param clientIp   the client IP address
    * @param method     the HTTP method
@@ -47,24 +102,8 @@ public final class AccessLogger {
    */
   public static void logAccess(String clientIp, String method, String path, int status,
                                long durationMs, long bytesSent, String userAgent, String backend) {
-    String timestamp = ISO_FORMATTER.format(Instant.now());
-
-    StringBuilder json = new StringBuilder();
-    json.append("{");
-    json.append("\"timestamp\":\"").append(timestamp).append("\",");
-    json.append("\"level\":\"INFO\",");
-    json.append("\"type\":\"access\",");
-    json.append("\"client_ip\":\"").append(escape(clientIp)).append("\",");
-    json.append("\"method\":\"").append(escape(method)).append("\",");
-    json.append("\"path\":\"").append(escape(path)).append("\",");
-    json.append("\"status\":").append(status).append(",");
-    json.append("\"duration_ms\":").append(durationMs).append(",");
-    json.append("\"bytes_sent\":").append(bytesSent).append(",");
-    json.append("\"user_agent\":\"").append(escape(userAgent)).append("\",");
-    json.append("\"backend\":\"").append(escape(backend)).append("\"");
-    json.append("}");
-
-    System.out.println(json);
+    logAccess(generateRequestId(), clientIp, method, path, status, durationMs, bytesSent,
+              userAgent, backend);
   }
 
   /**

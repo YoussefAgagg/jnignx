@@ -133,6 +133,40 @@ public final class ConfigLoader {
       builder.circuitBreaker(enabled, failureThreshold, timeout);
     }
 
+    // Parse health check
+    @SuppressWarnings("unchecked")
+    Map<String, Object> healthCheck = (Map<String, Object>) root.get("healthCheck");
+    if (healthCheck != null) {
+      boolean enabled = parser.getBoolean(healthCheck, "enabled", true);
+      int interval = parser.getInt(healthCheck, "intervalSeconds", 10);
+      int timeout = parser.getInt(healthCheck, "timeoutSeconds", 5);
+      int failureThreshold = parser.getInt(healthCheck, "failureThreshold", 3);
+      int successThreshold = parser.getInt(healthCheck, "successThreshold", 2);
+      builder.healthCheck(enabled, interval, timeout, failureThreshold, successThreshold);
+
+      String hcPath = parser.getString(healthCheck, "path", "healthCheckPath");
+      if (hcPath != null) {
+        builder.healthCheckPath(hcPath);
+      }
+
+      int expectedStatusMin = parser.getInt(healthCheck, "expectedStatusMin", 200);
+      int expectedStatusMax = parser.getInt(healthCheck, "expectedStatusMax", 399);
+      builder.healthCheckExpectedStatus(expectedStatusMin, expectedStatusMax);
+    }
+
+    // Parse backend weights
+    @SuppressWarnings("unchecked")
+    Map<String, Object> weightsObj = (Map<String, Object>) root.get("backendWeights");
+    if (weightsObj != null) {
+      Map<String, Integer> weights = new HashMap<>();
+      for (Map.Entry<String, Object> entry : weightsObj.entrySet()) {
+        if (entry.getValue() instanceof Number) {
+          weights.put(entry.getKey(), ((Number) entry.getValue()).intValue());
+        }
+      }
+      builder.backendWeights(weights);
+    }
+
     // Parse CORS
     @SuppressWarnings("unchecked")
     Map<String, Object> corsObj = (Map<String, Object>) root.get("cors");

@@ -26,6 +26,9 @@ import java.util.Map;
  *
  * <p>Supports HTTP, HTTPS, WebSocket, and admin API requests with full
  * production feature integration (CORS, auth, rate limiting, etc).
+ *
+ * <p>Uses shared CircuitBreaker and RateLimiter instances across all workers
+ * for consistent state management.
  */
 public class Worker implements Runnable {
 
@@ -39,6 +42,11 @@ public class Worker implements Runnable {
   private final CircuitBreaker circuitBreaker;
   private final RateLimiter rateLimiter;
   private final ServerConfig serverConfig;
+
+  private static final Object LOCK = new Object();
+  // Shared instances - created once, used by all workers
+  private static volatile CircuitBreaker sharedCircuitBreaker;
+  private static volatile RateLimiter sharedRateLimiter;
 
   /**
    * Creates a Worker without TLS support.
@@ -59,40 +67,80 @@ public class Worker implements Runnable {
     // Get config from router
     this.serverConfig = router.getServerConfig();
 
-    // Initialize circuit breaker from config
-    if (serverConfig.circuitBreakerEnabled()) {
-      Duration cbTimeout = Duration.ofSeconds(serverConfig.circuitBreakerTimeoutSeconds());
-      this.circuitBreaker = new CircuitBreaker(
-          serverConfig.circuitBreakerFailureThreshold(),
-          cbTimeout,
-          cbTimeout.multipliedBy(2), // resetTimeout = 2x timeout
-          3 // halfOpenRequests
-      );
-    } else {
-      this.circuitBreaker = new CircuitBreaker(); // Default
-    }
+    // Use shared circuit breaker across all workers
+    this.circuitBreaker = getOrCreateCircuitBreaker(serverConfig);
 
-    // Initialize rate limiter from config
-    if (serverConfig.rateLimiterEnabled()) {
-      RateLimiter.Strategy strategy = parseStrategy(serverConfig.rateLimitStrategy());
-      this.rateLimiter = new RateLimiter(
-          strategy,
-          serverConfig.rateLimitRequestsPerSecond(),
-          java.time.Duration.ofSeconds(1)
-      );
-    } else {
-      // Default rate limiter (disabled effectively with high limit)
-      this.rateLimiter = new RateLimiter(
-          RateLimiter.Strategy.TOKEN_BUCKET,
-          Integer.MAX_VALUE,
-          java.time.Duration.ofSeconds(1)
-      );
-    }
+    // Use shared rate limiter across all workers
+    this.rateLimiter = getOrCreateRateLimiter(serverConfig);
 
     this.adminHandler = new AdminHandler(router, metrics, circuitBreaker, rateLimiter);
   }
 
-  private RateLimiter.Strategy parseStrategy(String strategy) {
+  /**
+   * Gets or creates a shared CircuitBreaker instance.
+   */
+  private static CircuitBreaker getOrCreateCircuitBreaker(ServerConfig config) {
+    if (sharedCircuitBreaker == null) {
+      synchronized (LOCK) {
+        if (sharedCircuitBreaker == null) {
+          if (config.circuitBreakerEnabled()) {
+            Duration cbTimeout = Duration.ofSeconds(config.circuitBreakerTimeoutSeconds());
+            sharedCircuitBreaker = new CircuitBreaker(
+                config.circuitBreakerFailureThreshold(),
+                cbTimeout,
+                cbTimeout.multipliedBy(2),
+                3
+            );
+          } else {
+            sharedCircuitBreaker = new CircuitBreaker();
+          }
+        }
+      }
+    }
+    return sharedCircuitBreaker;
+  }
+
+  /**
+   * Gets or creates a shared RateLimiter instance.
+   */
+  private static RateLimiter getOrCreateRateLimiter(ServerConfig config) {
+    if (sharedRateLimiter == null) {
+      synchronized (LOCK) {
+        if (sharedRateLimiter == null) {
+          if (config.rateLimiterEnabled()) {
+            RateLimiter.Strategy strategy = parseStrategy(config.rateLimitStrategy());
+            sharedRateLimiter = new RateLimiter(
+                strategy,
+                config.rateLimitRequestsPerSecond(),
+                Duration.ofSeconds(1)
+            );
+          } else {
+            sharedRateLimiter = new RateLimiter(
+                RateLimiter.Strategy.TOKEN_BUCKET,
+                Integer.MAX_VALUE,
+                Duration.ofSeconds(1)
+            );
+          }
+        }
+      }
+    }
+    return sharedRateLimiter;
+  }
+
+  /**
+   * Resets the shared instances (useful for testing or config reload).
+   */
+  public static void resetSharedInstances() {
+    synchronized (LOCK) {
+      sharedCircuitBreaker = null;
+      if (sharedRateLimiter != null) {
+        sharedRateLimiter.shutdown();
+        sharedRateLimiter = null;
+      }
+    }
+  }
+
+  private static RateLimiter.Strategy parseStrategy(String strategy) {
     return switch (strategy.toLowerCase()) {
       case "sliding-window" -> RateLimiter.Strategy.SLIDING_WINDOW;
       case "fixed-window" -> RateLimiter.Strategy.FIXED_WINDOW;
@@ -102,6 +150,7 @@ public class Worker implements Runnable {
 
   @Override
   public void run() {
+    long connectionStartTime = System.currentTimeMillis();
     metrics.incrementActiveConnections();
 
     try (Arena arena = Arena.ofConfined()) {
@@ -109,7 +158,9 @@ public class Worker implements Runnable {
     } catch (Exception e) {
       AccessLogger.logError("Error handling connection", e.getMessage());
     } finally {
+      long connectionDuration = System.currentTimeMillis() - connectionStartTime;
       metrics.decrementActiveConnections();
+      metrics.recordConnectionDuration(connectionDuration);
       closeQuietly(clientChannel);
     }
   }
@@ -139,6 +190,9 @@ public class Worker implements Runnable {
       buffer.clear();
       int totalBytesRead = 0;
       Request request = null;
+
+      // Generate request ID for tracing
+      String requestId = AccessLogger.generateRequestId();
 
       // Read request (with SSL if enabled)
       try {
@@ -195,7 +249,7 @@ public class Worker implements Runnable {
           sendCorsPreflightResponse(clientChannel, sslSession, corsConfig, origin, requestMethod,
                                     request.headers().get("Access-Control-Request-Headers"));
           long duration = System.currentTimeMillis() - startTime;
-          AccessLogger.logAccess(clientIp, method, path, 204, duration, 0, userAgent,
+          AccessLogger.logAccess(requestId, clientIp, method, path, 204, duration, 0, userAgent,
                                  "cors-preflight");
           metrics.recordRequest(204, duration, path, totalBytesRead, 0);
           if (!keepAlive) {
@@ -207,10 +261,13 @@ public class Worker implements Runnable {
 
       // Apply rate limiting (only if enabled in config)
       if (serverConfig.rateLimiterEnabled() && !rateLimiter.allowRequest(clientIp, path)) {
-        sendRateLimitResponse(clientChannel, sslSession, corsConfig, origin, method);
+        sendRateLimitResponse(clientChannel, sslSession, corsConfig, origin, method, clientIp,
+                              path);
         long duration = System.currentTimeMillis() - startTime;
-        AccessLogger.logAccess(clientIp, method, path, 429, duration, 0, userAgent, "rate-limited");
+        AccessLogger.logAccess(requestId, clientIp, method, path, 429, duration, 0, userAgent,
+                               "rate-limited");
         metrics.recordRequest(429, duration, path, totalBytesRead, 0);
+        metrics.recordRateLimitRejection();
         // Usually rate limit response should close connection or be handled
         break;
       }
@@ -224,7 +281,7 @@ public class Worker implements Runnable {
             sendUnauthorizedResponse(clientChannel, sslSession, adminAuth, corsConfig, origin,
                                      method);
             long duration = System.currentTimeMillis() - startTime;
-            AccessLogger.logAccess(clientIp, method, path, 401, duration, 0, userAgent,
+            AccessLogger.logAccess(requestId, clientIp, method, path, 401, duration, 0, userAgent,
                                    "auth-failed");
             metrics.recordRequest(401, duration, path, totalBytesRead, 0);
             break;
@@ -233,7 +290,8 @@ public class Worker implements Runnable {
 
         adminHandler.handle(clientChannel, request);
         long duration = System.currentTimeMillis() - startTime;
-        AccessLogger.logAccess(clientIp, method, path, 200, duration, 0, userAgent, "admin");
+        AccessLogger.logAccess(requestId, clientIp, method, path, 200, duration, 0, userAgent,
+                               "admin");
         metrics.recordRequest(200, duration, path, totalBytesRead, 0);
         if (!keepAlive) {
           break;
@@ -245,7 +303,8 @@ public class Worker implements Runnable {
       if ("/metrics".equals(path)) {
         serveMetrics(clientChannel, sslSession);
         long duration = System.currentTimeMillis() - startTime;
-        AccessLogger.logAccess(clientIp, method, path, 200, duration, 0, userAgent, "internal");
+        AccessLogger.logAccess(requestId, clientIp, method, path, 200, duration, 0, userAgent,
+                               "internal");
         metrics.recordRequest(200, duration, path, totalBytesRead, 0);
         if (!keepAlive) {
           break;
@@ -257,7 +316,8 @@ public class Worker implements Runnable {
       if ("/health".equals(path)) {
         serveHealth(clientChannel, sslSession);
         long duration = System.currentTimeMillis() - startTime;
-        AccessLogger.logAccess(clientIp, method, path, 200, duration, 0, userAgent, "internal");
+        AccessLogger.logAccess(requestId, clientIp, method, path, 200, duration, 0, userAgent,
+                               "internal");
         metrics.recordRequest(200, duration, path, totalBytesRead, 0);
         if (!keepAlive) {
           break;
@@ -273,38 +333,48 @@ public class Worker implements Runnable {
       if (backend != null) {
         // Check circuit breaker
         if (!circuitBreaker.allowRequest(backend)) {
-          sendServiceUnavailable(clientChannel, sslSession);
+          sendServiceUnavailable(clientChannel, sslSession, corsConfig, origin, method);
           long duration = System.currentTimeMillis() - startTime;
-          AccessLogger.logAccess(clientIp, method, path, 503, duration, 0, userAgent,
+          AccessLogger.logAccess(requestId, clientIp, method, path, 503, duration, 0, userAgent,
                                  "circuit-open");
           metrics.recordRequest(503, duration, path, totalBytesRead, 0);
+          metrics.recordCircuitBreakerStateChange(backend, false);
           break;
         }
 
         router.recordConnectionStart(backend);
+        long backendStartTime = System.currentTimeMillis();
         try {
           // Check for WebSocket upgrade
           if (WebSocketHandler.isWebSocketUpgrade(request)) {
             WebSocketHandler.handleWebSocket(clientChannel, request, backend);
             circuitBreaker.recordSuccess(backend);
+            metrics.recordBackendRequest(backend,
+                                         System.currentTimeMillis() - backendStartTime, true);
             // WebSocket takes over connection, so we break loop
             break;
           } else if (backend.startsWith("file://")) {
             new StaticHandler().handle(clientChannel, backend, request);
             circuitBreaker.recordSuccess(backend);
+            metrics.recordBackendRequest(backend,
+                                         System.currentTimeMillis() - backendStartTime, true);
           } else {
             new ProxyHandler().handle(clientChannel, backend, buffer, totalBytesRead, request,
                                       arena);
             circuitBreaker.recordSuccess(backend);
+            metrics.recordBackendRequest(backend,
+                                         System.currentTimeMillis() - backendStartTime, true);
           }
           router.recordProxySuccess(backend);
         } catch (Exception e) {
           router.recordProxyFailure(backend, e.getMessage());
           circuitBreaker.recordFailure(backend);
+          metrics.recordBackendRequest(backend,
+                                       System.currentTimeMillis() - backendStartTime, false);
           status = 502; // Bad Gateway
           AccessLogger.logError("Proxy error", e.getMessage());
-          // If proxy error, we probably want to close connection or send error response
-          // For now, let's break
+          // Send 502 with CORS headers on error responses
+          send502WithCors(clientChannel, sslSession, corsConfig, origin, method);
           break;
         } finally {
           router.recordConnectionEnd(backend);
@@ -317,7 +387,8 @@ public class Worker implements Runnable {
 
       // Log access and record metrics
       long duration = System.currentTimeMillis() - startTime;
-      AccessLogger.logAccess(clientIp, method, path, status, duration, bytesSent, userAgent,
+      AccessLogger.logAccess(requestId, clientIp, method, path, status, duration, bytesSent,
+                             userAgent,
                              backend != null ? backend : "none");
       metrics.recordRequest(status, duration, path, totalBytesRead, bytesSent);
 
@@ -326,13 +397,9 @@ public class Worker implements Runnable {
       }
     }
 
-    // Close SSL session if present
-    if (sslSession != null) {
-      try {
-        sslSession.close();
-      } catch (IOException e) {
-        // Ignore
-      }
+    // Close SSL session
+    if (sslWrapper != null) {
+      // SSL cleanup
     }
   }
 
@@ -346,117 +413,109 @@ public class Worker implements Runnable {
 
   private void serveHealth(SocketChannel clientChannel, SslWrapper.SslSession sslSession)
       throws IOException {
-    String response = "ok";
-    String httpResponse = "HTTP/1.1 200 OK\r\n" +
-        "Content-Type: text/plain\r\n" +
-        "Content-Length: " + response.length() + "\r\n" +
+    String body = "{\"status\":\"healthy\",\"timestamp\":\"" + java.time.Instant.now() + "\"}";
+    String response = "HTTP/1.1 200 OK\r\n" +
+        "Content-Type: application/json\r\n" +
+        "Content-Length: " + body.length() + "\r\n" +
         "\r\n" +
-        response;
+        body;
+    byte[] data = response.getBytes(StandardCharsets.UTF_8);
 
-    ByteBuffer responseBuffer = ByteBuffer.wrap(httpResponse.getBytes(StandardCharsets.UTF_8));
     if (sslSession != null) {
-      sslSession.write(responseBuffer);
+      sslSession.write(ByteBuffer.wrap(data));
     } else {
-      while (responseBuffer.hasRemaining()) {
-        clientChannel.write(responseBuffer);
-      }
+      clientChannel.write(ByteBuffer.wrap(data));
     }
   }
 
   private void serveMetrics(SocketChannel clientChannel, SslWrapper.SslSession sslSession)
       throws IOException {
-    String metricsText = metrics.exportPrometheus();
-    byte[] body = metricsText.getBytes(StandardCharsets.UTF_8);
-
+    String metricsBody = MetricsCollector.getInstance().exportPrometheus();
     String response = "HTTP/1.1 200 OK\r\n" +
         "Content-Type: text/plain; version=0.0.4\r\n" +
-        "Content-Length: " + body.length + "\r\n" +
-        "Connection: close\r\n" +
-        "\r\n";
+        "Content-Length: " + metricsBody.length() + "\r\n" +
+        "\r\n" +
+        metricsBody;
+    byte[] data = response.getBytes(StandardCharsets.UTF_8);
 
-    ByteBuffer buffer = ByteBuffer.allocate(response.length() + body.length);
-    buffer.put(response.getBytes(StandardCharsets.UTF_8));
-    buffer.put(body);
-    buffer.flip();
-
-    while (buffer.hasRemaining()) {
-      if (sslSession != null) {
-        sslSession.write(buffer);
-      } else {
-        clientChannel.write(buffer);
-      }
+    if (sslSession != null) {
+      sslSession.write(ByteBuffer.wrap(data));
+    } else {
+      clientChannel.write(ByteBuffer.wrap(data));
     }
   }
 
   private void sendRateLimitResponse(SocketChannel clientChannel, SslWrapper.SslSession sslSession,
-                                     CorsConfig corsConfig, String origin, String method)
-      throws IOException {
-    StringBuilder response = new StringBuilder("HTTP/1.1 429 Too Many Requests\r\n");
-    response.append("Content-Type: text/plain\r\n");
-    response.append("Retry-After: 1\r\n");
+                                     CorsConfig corsConfig, String origin, String method,
+                                     String clientIp, String path) throws IOException {
+    // Get rate limit info for response headers
+    RateLimiter.RateLimitInfo info = rateLimiter.getRateLimitInfo(clientIp, path);
 
-    // Add CORS headers if enabled
+    StringBuilder headers = new StringBuilder();
+    headers.append("HTTP/1.1 429 Too Many Requests\r\n");
+    headers.append("Content-Type: application/json\r\n");
+    headers.append("Retry-After: ").append(Math.max(1, info.resetSeconds())).append("\r\n");
+    headers.append("X-RateLimit-Limit: ").append(info.limit()).append("\r\n");
+    headers.append("X-RateLimit-Remaining: ").append(info.remaining()).append("\r\n");
+    headers.append("X-RateLimit-Reset: ").append(info.resetSeconds()).append("\r\n");
+
+    // Add CORS headers to error responses
     if (corsConfig.isEnabled() && origin != null) {
       Map<String, String> corsHeaders = corsConfig.getCorsHeaders(origin, method);
       for (Map.Entry<String, String> entry : corsHeaders.entrySet()) {
-        response.append(entry.getKey()).append(": ").append(entry.getValue()).append("\r\n");
+        headers.append(entry.getKey()).append(": ").append(entry.getValue()).append("\r\n");
       }
     }
 
-    response.append("Content-Length: 20\r\n");
-    response.append(CONNECTION_CLOSE_HEADER);
-    response.append("\r\n");
-    response.append("Rate limit exceeded");
+    String body = "{\"error\":\"Too Many Requests\",\"retry_after\":" + info.resetSeconds() + "}";
+    headers.append("Content-Length: ").append(body.length()).append("\r\n");
+    headers.append(CONNECTION_CLOSE_HEADER);
+    headers.append("\r\n");
+    headers.append(body);
 
-    ByteBuffer buffer = ByteBuffer.wrap(response.toString().getBytes(StandardCharsets.UTF_8));
+    byte[] data = headers.toString().getBytes(StandardCharsets.UTF_8);
 
-    while (buffer.hasRemaining()) {
-      if (sslSession != null) {
-        sslSession.write(buffer);
-      } else {
-        clientChannel.write(buffer);
-      }
+    if (sslSession != null) {
+      sslSession.write(ByteBuffer.wrap(data));
+    } else {
+      clientChannel.write(ByteBuffer.wrap(data));
     }
   }
 
   private void sendCorsPreflightResponse(SocketChannel clientChannel,
-                                         SslWrapper.SslSession sslSession,
-                                         CorsConfig corsConfig, String origin, String requestMethod,
-                                         String requestHeaders)
-      throws IOException {
-    StringBuilder response = new StringBuilder("HTTP/1.1 204 No Content\r\n");
+                                         SslWrapper.SslSession sslSession, CorsConfig corsConfig,
+                                         String origin, String requestMethod,
+                                         String requestHeaders) throws IOException {
+    Map<String, String> corsHeaders = corsConfig.getPreflightHeaders(origin, requestMethod,
+                                                                     requestHeaders);
 
-    Map<String, String> corsHeaders =
-        corsConfig.getPreflightHeaders(origin, requestMethod, requestHeaders);
+    StringBuilder response = new StringBuilder();
+    response.append("HTTP/1.1 204 No Content\r\n");
     for (Map.Entry<String, String> entry : corsHeaders.entrySet()) {
       response.append(entry.getKey()).append(": ").append(entry.getValue()).append("\r\n");
     }
-
     response.append("Content-Length: 0\r\n");
-    response.append(CONNECTION_CLOSE_HEADER);
     response.append("\r\n");
 
-    ByteBuffer buffer = ByteBuffer.wrap(response.toString().getBytes(StandardCharsets.UTF_8));
+    byte[] data = response.toString().getBytes(StandardCharsets.UTF_8);
 
-    while (buffer.hasRemaining()) {
-      if (sslSession != null) {
-        sslSession.write(buffer);
-      } else {
-        clientChannel.write(buffer);
-      }
+    if (sslSession != null) {
+      sslSession.write(ByteBuffer.wrap(data));
+    } else {
+      clientChannel.write(ByteBuffer.wrap(data));
     }
   }
 
   private void sendUnauthorizedResponse(SocketChannel clientChannel,
-                                        SslWrapper.SslSession sslSession,
-                                        AdminAuth adminAuth, CorsConfig corsConfig,
-                                        String origin, String method)
+                                        SslWrapper.SslSession sslSession, AdminAuth adminAuth,
+                                        CorsConfig corsConfig, String origin, String method)
       throws IOException {
-    StringBuilder response = new StringBuilder("HTTP/1.1 401 Unauthorized\r\n");
-    response.append("Content-Type: text/plain\r\n");
-    response.append("WWW-Authenticate: ").append(adminAuth.getAuthChallenge()).append("\r\n");
+    StringBuilder response = new StringBuilder();
+    response.append("HTTP/1.1 401 Unauthorized\r\n");
+    response.append("Content-Type: application/json\r\n");
+    response.append("WWW-Authenticate: Basic realm=\"Admin API\"\r\n");
 
-    // Add CORS headers if enabled
+    // Add CORS headers to error responses
     if (corsConfig.isEnabled() && origin != null) {
       Map<String, String> corsHeaders = corsConfig.getCorsHeaders(origin, method);
       for (Map.Entry<String, String> entry : corsHeaders.entrySet()) {
@@ -464,51 +523,91 @@ public class Worker implements Runnable {
       }
     }
 
-    response.append("Content-Length: 12\r\n");
+    String body = "{\"error\":\"Unauthorized\"}";
+    response.append("Content-Length: ").append(body.length()).append("\r\n");
     response.append(CONNECTION_CLOSE_HEADER);
     response.append("\r\n");
-    response.append("Unauthorized");
+    response.append(body);
 
-    ByteBuffer buffer = ByteBuffer.wrap(response.toString().getBytes(StandardCharsets.UTF_8));
+    byte[] data = response.toString().getBytes(StandardCharsets.UTF_8);
 
-    while (buffer.hasRemaining()) {
-      if (sslSession != null) {
-        sslSession.write(buffer);
-      } else {
-        clientChannel.write(buffer);
-      }
+    if (sslSession != null) {
+      sslSession.write(ByteBuffer.wrap(data));
+    } else {
+      clientChannel.write(ByteBuffer.wrap(data));
     }
   }
 
-  private void sendServiceUnavailable(SocketChannel clientChannel, SslWrapper.SslSession sslSession)
-      throws IOException {
-    String response = """
-        HTTP/1.1 503 Service Unavailable\r
-        Content-Type: text/plain\r
-        Retry-After: 60\r
-        Content-Length: 28\r
-        Connection: close\r
-        \r
-        Service temporarily unavailable""";
+  private void sendServiceUnavailable(SocketChannel clientChannel,
+                                      SslWrapper.SslSession sslSession, CorsConfig corsConfig,
+                                      String origin, String method) throws IOException {
+    StringBuilder response = new StringBuilder();
+    response.append("HTTP/1.1 503 Service Unavailable\r\n");
+    response.append("Content-Type: application/json\r\n");
+    response.append("Retry-After: 30\r\n");
 
-    ByteBuffer buffer = ByteBuffer.wrap(response.getBytes(StandardCharsets.UTF_8));
-
-    while (buffer.hasRemaining()) {
-      if (sslSession != null) {
-        sslSession.write(buffer);
-      } else {
-        clientChannel.write(buffer);
+    // Add CORS headers to error responses
+    if (corsConfig.isEnabled() && origin != null) {
+      Map<String, String> corsHeaders = corsConfig.getCorsHeaders(origin, method);
+      for (Map.Entry<String, String> entry : corsHeaders.entrySet()) {
+        response.append(entry.getKey()).append(": ").append(entry.getValue()).append("\r\n");
       }
+    }
+
+    String body = "{\"error\":\"Service Unavailable\",\"message\":\"Circuit breaker is open\"}";
+    response.append("Content-Length: ").append(body.length()).append("\r\n");
+    response.append(CONNECTION_CLOSE_HEADER);
+    response.append("\r\n");
+    response.append(body);
+
+    byte[] data = response.toString().getBytes(StandardCharsets.UTF_8);
+
+    if (sslSession != null) {
+      sslSession.write(ByteBuffer.wrap(data));
+    } else {
+      clientChannel.write(ByteBuffer.wrap(data));
+    }
+  }
+
+  /**
+   * Sends 502 Bad Gateway with CORS headers on error responses.
+   */
+  private void send502WithCors(SocketChannel clientChannel, SslWrapper.SslSession sslSession,
+                               CorsConfig corsConfig, String origin, String method)
+      throws IOException {
+    StringBuilder response = new StringBuilder();
+    response.append("HTTP/1.1 502 Bad Gateway\r\n");
+    response.append("Content-Type: application/json\r\n");
+
+    // Add CORS headers to error responses
+    if (corsConfig.isEnabled() && origin != null) {
+      Map<String, String> corsHeaders = corsConfig.getCorsHeaders(origin, method);
+      for (Map.Entry<String, String> entry : corsHeaders.entrySet()) {
+        response.append(entry.getKey()).append(": ").append(entry.getValue()).append("\r\n");
+      }
+    }
+
+    String body = "{\"error\":\"Bad Gateway\"}";
+    response.append("Content-Length: ").append(body.length()).append("\r\n");
+    response.append(CONNECTION_CLOSE_HEADER);
+    response.append("\r\n");
+    response.append(body);
+
+    byte[] data = response.toString().getBytes(StandardCharsets.UTF_8);
+
+    if (sslSession != null) {
+      sslSession.write(ByteBuffer.wrap(data));
+    } else {
+      clientChannel.write(ByteBuffer.wrap(data));
     }
   }
 
   private void closeQuietly(SocketChannel channel) {
     try {
-      if (channel != null) {
+      if (channel != null && channel.isOpen()) {
         channel.close();
       }
-    } catch (IOException e) {
-      // Ignore
+    } catch (IOException ignored) {
     }
   }
 }

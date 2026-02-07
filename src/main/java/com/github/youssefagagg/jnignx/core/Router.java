@@ -1,6 +1,7 @@
 package com.github.youssefagagg.jnignx.core;
 
 import com.github.youssefagagg.jnignx.config.ConfigLoader;
+import com.github.youssefagagg.jnignx.config.ConfigValidator;
 import com.github.youssefagagg.jnignx.config.RouteConfig;
 import com.github.youssefagagg.jnignx.config.ServerConfig;
 import java.io.IOException;
@@ -28,6 +29,8 @@ import java.util.concurrent.atomic.AtomicReference;
  * configuration file's last modified timestamp. When a change is detected,
  * the new configuration is parsed and atomically swapped in, ensuring active
  * requests continue with the old config while new requests use the updated one.
+ *
+ * <p><b>Validation:</b> Configuration is validated before being applied.
  */
 public final class Router {
 
@@ -86,9 +89,31 @@ public final class Router {
       // Try to load enhanced ServerConfig first
       try {
         ServerConfig serverConfig = ConfigLoader.loadServerConfig(configPath);
+
+        // Validate config before applying
+        try {
+          ConfigValidator validator = new ConfigValidator();
+          List<String> errors = validator.validate(serverConfig.toRouteConfig());
+          if (!errors.isEmpty()) {
+            System.err.println(
+                "[Router] Config validation warnings: " + String.join(", ", errors));
+          }
+        } catch (Exception e) {
+          System.err.println(
+              "[Router] Config validation warning: " + e.getMessage());
+          // Continue with the config - warnings don't prevent loading
+        }
+
         serverConfigRef.set(serverConfig);
         configRef.set(serverConfig.toRouteConfig());
         lastModified = Files.getLastModifiedTime(configPath);
+
+        // Configure health checker from ServerConfig
+        configureHealthChecker(serverConfig);
+
+        // Configure load balancer weights from ServerConfig
+        configureLoadBalancerWeights(serverConfig);
+
         System.out.println("[Router] Loaded enhanced configuration from " + configPath);
         System.out.println("[Router] Routes: " + serverConfig.routes().keySet());
         System.out.println("[Router] Rate Limiter: " +
@@ -99,6 +124,7 @@ public final class Router {
             "[Router] CORS: " + (serverConfig.corsConfig().isEnabled() ? "enabled" : "disabled"));
         System.out.println("[Router] Admin Auth: " +
                                (serverConfig.adminAuth().isEnabled() ? "enabled" : "disabled"));
+        System.out.println("[Router] Health Check Path: " + serverConfig.healthCheckPath());
       } catch (Exception e) {
         // Fallback to simple RouteConfig for backward compatibility
         System.out.println(
@@ -128,6 +154,35 @@ public final class Router {
   }
 
   /**
+   * Configures the health checker from ServerConfig parameters.
+   */
+  private void configureHealthChecker(ServerConfig config) {
+    healthChecker.configure(
+        config.healthCheckIntervalSeconds(),
+        config.healthCheckTimeoutSeconds(),
+        config.healthCheckFailureThreshold(),
+        config.healthCheckSuccessThreshold()
+    );
+    healthChecker.setHealthCheckPath(config.healthCheckPath());
+    healthChecker.setExpectedStatusRange(
+        config.healthCheckExpectedStatusMin(),
+        config.healthCheckExpectedStatusMax()
+    );
+  }
+
+  /**
+   * Configures load balancer weights from ServerConfig.
+   */
+  private void configureLoadBalancerWeights(ServerConfig config) {
+    Map<String, Integer> weights = config.backendWeights();
+    if (weights != null) {
+      for (Map.Entry<String, Integer> entry : weights.entrySet()) {
+        loadBalancer.setWeight(entry.getKey(), entry.getValue());
+      }
+    }
+  }
+
+  /**
    * Starts the hot-reload watcher in a dedicated Virtual Thread.
    * The watcher monitors the configuration file for changes every second
    * and atomically updates the routing configuration when changes are detected.
@@ -153,6 +208,7 @@ public final class Router {
   /**
    * Checks if the configuration file has been modified and reloads it.
    * Uses atomic swap to ensure thread-safe configuration updates.
+   * Validates configuration before applying.
    */
   private void checkAndReload() throws IOException {
     if (!Files.exists(configPath)) {
@@ -161,19 +217,54 @@ public final class Router {
 
     FileTime currentModified = Files.getLastModifiedTime(configPath);
     if (lastModified == null || currentModified.compareTo(lastModified) > 0) {
-      RouteConfig newConfig = ConfigLoader.load(configPath);
+      // Validate new config before loading
+      try {
+        ServerConfig newServerConfig = ConfigLoader.loadServerConfig(configPath);
+        ConfigValidator validator = new ConfigValidator();
+        List<String> errors = validator.validate(newServerConfig.toRouteConfig());
+        if (!errors.isEmpty()) {
+          System.err.println("[Router] Validation warnings: " + String.join(", ", errors));
+        }
 
-      // Atomic swap - ensures thread safety for active requests
-      RouteConfig oldConfig = configRef.getAndSet(newConfig);
-      lastModified = currentModified;
+        // Validation passed - apply new config
+        serverConfigRef.set(newServerConfig);
+        configRef.set(newServerConfig.toRouteConfig());
+        lastModified = currentModified;
 
-      // Reset round-robin counters for changed routes
-      roundRobinCounters.clear();
+        // Reconfigure health checker
+        configureHealthChecker(newServerConfig);
+        configureLoadBalancerWeights(newServerConfig);
 
-      System.out.println("[Router] Configuration reloaded!");
-      System.out.println(
-          "[Router] Old routes: " + (oldConfig != null ? oldConfig.routes().keySet() : "none"));
-      System.out.println("[Router] New routes: " + newConfig.routes().keySet());
+        // Register new backends for health checking
+        for (List<String> backends : newServerConfig.routes().values()) {
+          for (String backend : backends) {
+            healthChecker.registerBackend(backend);
+          }
+        }
+
+        // Reset shared worker instances so they pick up new config
+        Worker.resetSharedInstances();
+
+        roundRobinCounters.clear();
+        System.out.println("[Router] Configuration reloaded and validated!");
+        System.out.println("[Router] New routes: " + newServerConfig.routes().keySet());
+      } catch (Exception e) {
+        System.err.println("[Router] Config validation failed, keeping old config: " +
+                               e.getMessage());
+        // Fallback to simple RouteConfig reload without validation
+        try {
+          RouteConfig newConfig = ConfigLoader.load(configPath);
+          RouteConfig oldConfig = configRef.getAndSet(newConfig);
+          lastModified = currentModified;
+          roundRobinCounters.clear();
+          System.out.println("[Router] Configuration reloaded (simple mode)!");
+          System.out.println("[Router] Old routes: " +
+                                 (oldConfig != null ? oldConfig.routes().keySet() : "none"));
+          System.out.println("[Router] New routes: " + newConfig.routes().keySet());
+        } catch (Exception e2) {
+          System.err.println("[Router] Failed to reload config: " + e2.getMessage());
+        }
+      }
     }
   }
 

@@ -8,6 +8,7 @@ import java.util.concurrent.Executors;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
+import java.util.concurrent.atomic.AtomicLong;
 
 /**
  * Rate limiter with multiple strategies for request throttling.
@@ -19,8 +20,10 @@ import java.util.concurrent.atomic.AtomicInteger;
  * <ul>
  *   <li>Token bucket algorithm</li>
  *   <li>Sliding window counter</li>
+ *   <li>Fixed window counter</li>
  *   <li>Per-client IP limiting</li>
  *   <li>Per-path limiting</li>
+ *   <li>Rate limit response headers (X-RateLimit-*)</li>
  *   <li>Automatic cleanup of expired entries</li>
  *   <li>Virtual thread compatible</li>
  * </ul>
@@ -32,6 +35,7 @@ public final class RateLimiter {
   private final Duration window;
   private final Map<String, Bucket> buckets = new ConcurrentHashMap<>();
   private final ScheduledExecutorService cleaner;
+  private final AtomicLong totalRejected = new AtomicLong(0);
 
   /**
    * Creates a rate limiter with the specified strategy.
@@ -76,7 +80,11 @@ public final class RateLimiter {
     String key = path != null ? clientIp + ":" + path : clientIp;
     Bucket bucket = buckets.computeIfAbsent(key, k -> createBucket());
 
-    return bucket.tryConsume();
+    boolean allowed = bucket.tryConsume();
+    if (!allowed) {
+      totalRejected.incrementAndGet();
+    }
+    return allowed;
   }
 
   /**
@@ -96,11 +104,73 @@ public final class RateLimiter {
   }
 
   /**
+   * Gets rate limit info for response headers.
+   *
+   * @param clientIp the client IP address
+   * @param path     the request path (may be null)
+   * @return RateLimitInfo with limit, remaining, and reset information
+   */
+  public RateLimitInfo getRateLimitInfo(String clientIp, String path) {
+    String key = path != null ? clientIp + ":" + path : clientIp;
+    Bucket bucket = buckets.get(key);
+    if (bucket == null) {
+      return new RateLimitInfo(maxRequests, maxRequests, 0);
+    }
+    int count = bucket.getCount();
+    int remaining = Math.max(0, maxRequests - count);
+    long resetSeconds = bucket.getRetryAfter().toSeconds();
+    return new RateLimitInfo(maxRequests, remaining, resetSeconds);
+  }
+
+  /**
+   * Gets the maximum requests per window.
+   */
+  public int getMaxRequests() {
+    return maxRequests;
+  }
+
+  /**
+   * Gets the current strategy.
+   */
+  public Strategy getStrategy() {
+    return strategy;
+  }
+
+  /**
+   * Gets the window duration.
+   */
+  public Duration getWindow() {
+    return window;
+  }
+
+  /**
+   * Gets the number of active client entries being tracked.
+   */
+  public int getActiveClientCount() {
+    return buckets.size();
+  }
+
+  /**
+   * Gets the total number of rejected requests.
+   */
+  public long getTotalRejected() {
+    return totalRejected.get();
+  }
+
+  /**
    * Cleans up expired entries.
    */
   private void cleanup() {
     Instant now = Instant.now();
     buckets.entrySet().removeIf(entry -> entry.getValue().isExpired(now));
+  }
+
+  /**
+   * Resets all rate limit state.
+   */
+  public void reset() {
+    buckets.clear();
+    totalRejected.set(0);
   }
 
   /**
@@ -119,6 +189,12 @@ public final class RateLimiter {
    */
   public void shutdown() {
     cleaner.shutdown();
+  }
+
+  /**
+   * Rate limit information for response headers.
+   */
+  public record RateLimitInfo(int limit, int remaining, long resetSeconds) {
   }
 
   /**

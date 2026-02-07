@@ -12,6 +12,7 @@ import java.util.concurrent.atomic.AtomicLong;
  * <p>Supports multiple algorithms:
  * <ul>
  *   <li><b>Round Robin:</b> Distributes requests evenly in a circular fashion</li>
+ *   <li><b>Weighted Round Robin:</b> Distributes requests based on backend weights</li>
  *   <li><b>Least Connections:</b> Sends requests to the backend with fewest active connections</li>
  *   <li><b>IP Hash:</b> Consistent hashing for sticky sessions based on client IP</li>
  * </ul>
@@ -22,11 +23,47 @@ public final class LoadBalancer {
   private final Map<String, AtomicInteger> roundRobinCounters;
   private final Map<String, AtomicLong> connectionCounts;
   private final HealthChecker healthChecker;
+
+  // Weighted round-robin state
+  private final Map<String, Integer> backendWeights;
+  private final Map<String, AtomicInteger> weightedCounters;
+
   public LoadBalancer(Strategy strategy, HealthChecker healthChecker) {
     this.strategy = strategy;
     this.roundRobinCounters = new ConcurrentHashMap<>();
     this.connectionCounts = new ConcurrentHashMap<>();
     this.healthChecker = healthChecker;
+    this.backendWeights = new ConcurrentHashMap<>();
+    this.weightedCounters = new ConcurrentHashMap<>();
+  }
+
+  /**
+   * Sets the weight for a backend. Higher weight means more traffic.
+   *
+   * @param backend the backend URL
+   * @param weight  the weight (1-100, default is 1)
+   */
+  public void setWeight(String backend, int weight) {
+    backendWeights.put(backend, Math.max(1, weight));
+  }
+
+  /**
+   * Gets the weight for a backend.
+   *
+   * @param backend the backend URL
+   * @return the weight (default 1)
+   */
+  public int getWeight(String backend) {
+    return backendWeights.getOrDefault(backend, 1);
+  }
+
+  /**
+   * Gets all backend weights.
+   *
+   * @return map of backend URLs to weights
+   */
+  public Map<String, Integer> getAllWeights() {
+    return Map.copyOf(backendWeights);
   }
 
   /**
@@ -59,6 +96,7 @@ public final class LoadBalancer {
 
     return switch (strategy) {
       case ROUND_ROBIN -> selectRoundRobin(path, healthyBackends);
+      case WEIGHTED_ROUND_ROBIN -> selectWeightedRoundRobin(path, healthyBackends);
       case LEAST_CONNECTIONS -> selectLeastConnections(healthyBackends);
       case IP_HASH -> selectIpHash(clientIp, healthyBackends);
     };
@@ -71,6 +109,35 @@ public final class LoadBalancer {
     AtomicInteger counter = roundRobinCounters.computeIfAbsent(path, _ -> new AtomicInteger(0));
     int index = Math.abs(counter.getAndIncrement() % backends.size());
     return backends.get(index);
+  }
+
+  /**
+   * Weighted round-robin selection: distributes traffic based on backend weights.
+   * Backends with higher weights receive proportionally more traffic.
+   */
+  private String selectWeightedRoundRobin(String path, List<String> backends) {
+    // Build weighted list: each backend appears weight times
+    int totalWeight = 0;
+    int[] weights = new int[backends.size()];
+    for (int i = 0; i < backends.size(); i++) {
+      weights[i] = backendWeights.getOrDefault(backends.get(i), 1);
+      totalWeight += weights[i];
+    }
+
+    AtomicInteger counter = weightedCounters.computeIfAbsent(path, _ -> new AtomicInteger(0));
+    int current = Math.abs(counter.getAndIncrement() % totalWeight);
+
+    // Find which backend corresponds to this position
+    int cumulative = 0;
+    for (int i = 0; i < backends.size(); i++) {
+      cumulative += weights[i];
+      if (current < cumulative) {
+        return backends.get(i);
+      }
+    }
+
+    // Fallback
+    return backends.getLast();
   }
 
   /**
@@ -153,10 +220,20 @@ public final class LoadBalancer {
   }
 
   /**
+   * Gets the current strategy.
+   *
+   * @return the load balancing strategy
+   */
+  public Strategy getStrategy() {
+    return strategy;
+  }
+
+  /**
    * Load balancing strategy enum.
    */
   public enum Strategy {
     ROUND_ROBIN,
+    WEIGHTED_ROUND_ROBIN,
     LEAST_CONNECTIONS,
     IP_HASH
   }

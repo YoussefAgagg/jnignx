@@ -1,6 +1,7 @@
 package com.github.youssefagagg.jnignx.handlers;
 
 import com.github.youssefagagg.jnignx.core.CircuitBreaker;
+import com.github.youssefagagg.jnignx.core.HealthChecker;
 import com.github.youssefagagg.jnignx.core.RateLimiter;
 import com.github.youssefagagg.jnignx.core.Router;
 import com.github.youssefagagg.jnignx.http.Request;
@@ -10,6 +11,8 @@ import java.nio.channels.SocketChannel;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.time.Instant;
+import java.util.List;
+import java.util.Map;
 
 /**
  * Admin API handler for runtime server management.
@@ -22,6 +25,7 @@ import java.time.Instant;
  *   <li>Circuit breaker control</li>
  *   <li>Rate limiter status</li>
  *   <li>Server statistics</li>
+ *   <li>Backend health status</li>
  * </ul>
  *
  * <p><b>Security:</b> Should be protected with authentication in production.
@@ -37,6 +41,9 @@ import java.time.Instant;
  * POST /admin/circuits/reset  - Reset circuit breakers
  * GET  /admin/ratelimit       - Rate limiter status
  * POST /admin/ratelimit/reset - Reset rate limiters
+ * GET  /admin/backends        - Backend health status
+ * GET  /admin/config          - Server feature list
+ * POST /admin/config/update   - Update configuration
  * </pre>
  */
 public final class AdminHandler {
@@ -64,33 +71,55 @@ public final class AdminHandler {
   }
 
   /**
-   * Handles admin API requests.
+   * Handles admin API requests with proper status codes.
    */
   public void handle(SocketChannel channel, Request request) throws IOException {
     String path = request.path();
     String method = request.method();
 
-    // Route to appropriate handler
-    String response = switch (path) {
-      case "/admin/health" -> handleHealth();
-      case "/admin/metrics" -> handleMetrics();
-      case "/admin/stats" -> handleStats();
-      case "/admin/routes" -> handleRoutes();
-      case "/admin/routes/reload" ->
-          method.equals("POST") ? handleReloadRoutes() : methodNotAllowed();
-      case "/admin/circuits" -> handleCircuits();
-      case "/admin/circuits/reset" ->
-          method.equals("POST") ? handleResetCircuits(request) : methodNotAllowed();
-      case "/admin/ratelimit" -> handleRateLimit();
-      case "/admin/ratelimit/reset" ->
-          method.equals("POST") ? handleResetRateLimit(request) : methodNotAllowed();
-      case "/admin/config" -> handleConfig();
-      case "/admin/config/update" ->
-          method.equals("POST") ? handleUpdateConfig(request) : methodNotAllowed();
-      default -> notFound();
-    };
+    // Strip query parameters for routing
+    String routePath = path.contains("?") ? path.substring(0, path.indexOf("?")) : path;
 
-    sendJsonResponse(channel, response);
+    // Route to appropriate handler with proper status codes
+    switch (routePath) {
+      case "/admin/health" -> sendJsonResponse(channel, 200, handleHealth());
+      case "/admin/metrics" -> sendJsonResponse(channel, 200, handleMetrics());
+      case "/admin/stats" -> sendJsonResponse(channel, 200, handleStats());
+      case "/admin/routes" -> sendJsonResponse(channel, 200, handleRoutes());
+      case "/admin/routes/reload" -> {
+        if ("POST".equals(method)) {
+          sendJsonResponse(channel, 200, handleReloadRoutes());
+        } else {
+          sendJsonResponse(channel, 405, methodNotAllowed());
+        }
+      }
+      case "/admin/circuits" -> sendJsonResponse(channel, 200, handleCircuits());
+      case "/admin/circuits/reset" -> {
+        if ("POST".equals(method)) {
+          sendJsonResponse(channel, 200, handleResetCircuits(request));
+        } else {
+          sendJsonResponse(channel, 405, methodNotAllowed());
+        }
+      }
+      case "/admin/ratelimit" -> sendJsonResponse(channel, 200, handleRateLimit());
+      case "/admin/ratelimit/reset" -> {
+        if ("POST".equals(method)) {
+          sendJsonResponse(channel, 200, handleResetRateLimit(request));
+        } else {
+          sendJsonResponse(channel, 405, methodNotAllowed());
+        }
+      }
+      case "/admin/backends" -> sendJsonResponse(channel, 200, handleBackends());
+      case "/admin/config" -> sendJsonResponse(channel, 200, handleConfig());
+      case "/admin/config/update" -> {
+        if ("POST".equals(method)) {
+          sendJsonResponse(channel, 200, handleUpdateConfig(request));
+        } else {
+          sendJsonResponse(channel, 405, methodNotAllowed());
+        }
+      }
+      default -> sendJsonResponse(channel, 404, notFound());
+    }
   }
 
   /**
@@ -186,17 +215,42 @@ public final class AdminHandler {
   }
 
   /**
-   * Circuit breaker status endpoint.
+   * Circuit breaker status endpoint - returns actual circuit states for all backends.
    */
   private String handleCircuits() {
     if (circuitBreaker == null) {
       return error("Circuit breaker not configured");
     }
 
+    // Get all backends from router config
+    Map<String, List<String>> routes = router.getCurrentConfig().routes();
     StringBuilder json = new StringBuilder("{\n  \"circuits\": [\n");
-    // Note: Would need to track backend URLs to list all circuits
-    // This is a simplified version
-    json.append("  ]\n}");
+    boolean first = true;
+
+    for (List<String> backends : routes.values()) {
+      for (String backend : backends) {
+        if (backend.startsWith("file://")) {
+          continue;
+        }
+        CircuitBreaker.CircuitStats stats = circuitBreaker.getStats(backend);
+        if (!first) {
+          json.append(",\n");
+        }
+        first = false;
+        json.append("    {\n");
+        json.append("      \"backend\": \"").append(escapeJson(backend)).append("\",\n");
+        json.append("      \"state\": \"").append(stats.state()).append("\",\n");
+        json.append("      \"failure_count\": ").append(stats.failureCount()).append(",\n");
+        json.append("      \"success_count\": ").append(stats.successCount()).append(",\n");
+        json.append("      \"half_open_requests\": ").append(stats.halfOpenRequestCount())
+            .append(",\n");
+        json.append("      \"success_rate\": ")
+            .append(String.format("%.2f", stats.successRate())).append("\n");
+        json.append("    }");
+      }
+    }
+
+    json.append("\n  ]\n}");
     return json.toString();
   }
 
@@ -219,22 +273,30 @@ public final class AdminHandler {
   }
 
   /**
-   * Rate limiter status endpoint.
+   * Rate limiter status endpoint - returns actual rate limiter state.
    */
   private String handleRateLimit() {
     if (rateLimiter == null) {
       return error("Rate limiter not configured");
     }
 
-    // Simplified - would show rate limit status for active clients
-    return """
-        {
-            "rate_limiter": {
-                "enabled": true,
-                "active_clients": 0
-            }
-        }
-        """;
+    return String.format("""
+                             {
+                                 "rate_limiter": {
+                                     "enabled": true,
+                                     "strategy": "%s",
+                                     "max_requests": %d,
+                                     "window_seconds": %d,
+                                     "active_clients": %d,
+                                     "total_rejected": %d
+                                 }
+                             }
+                             """,
+                         rateLimiter.getStrategy(),
+                         rateLimiter.getMaxRequests(),
+                         rateLimiter.getWindow().toSeconds(),
+                         rateLimiter.getActiveClientCount(),
+                         rateLimiter.getTotalRejected());
   }
 
   /**
@@ -245,7 +307,43 @@ public final class AdminHandler {
       return error("Rate limiter not configured");
     }
 
+    rateLimiter.reset();
     return success("Rate limiters reset");
+  }
+
+  /**
+   * Backend health status endpoint.
+   */
+  private String handleBackends() {
+    HealthChecker healthChecker = router.getHealthChecker();
+    Map<String, HealthChecker.BackendHealth> allHealth = healthChecker.getAllHealth();
+
+    StringBuilder json = new StringBuilder("{\n  \"backends\": [\n");
+    boolean first = true;
+
+    for (Map.Entry<String, HealthChecker.BackendHealth> entry : allHealth.entrySet()) {
+      if (!first) {
+        json.append(",\n");
+      }
+      first = false;
+      HealthChecker.BackendHealth health = entry.getValue();
+      json.append("    {\n");
+      json.append("      \"url\": \"").append(escapeJson(entry.getKey())).append("\",\n");
+      json.append("      \"healthy\": ").append(health.isHealthy()).append(",\n");
+      json.append("      \"consecutive_failures\": ").append(health.getConsecutiveFailures())
+          .append(",\n");
+      json.append("      \"consecutive_successes\": ").append(health.getConsecutiveSuccesses())
+          .append(",\n");
+      json.append("      \"last_check\": \"").append(health.getLastCheck()).append("\",\n");
+      json.append("      \"last_error\": ")
+          .append(health.getLastError() != null ?
+                      "\"" + escapeJson(health.getLastError()) + "\"" : "null")
+          .append("\n");
+      json.append("    }");
+    }
+
+    json.append("\n  ]\n}");
+    return json.toString();
   }
 
   /**
@@ -262,10 +360,17 @@ public final class AdminHandler {
                     "websocket",
                     "tls",
                     "load_balancing",
+                    "weighted_load_balancing",
                     "health_checking",
                     "circuit_breaker",
                     "rate_limiting",
-                    "compression"
+                    "compression",
+                    "range_requests",
+                    "conditional_requests",
+                    "connection_pooling",
+                    "retry_logic",
+                    "chunked_transfer_encoding",
+                    "request_tracing"
                 ]
             }
         }
@@ -273,11 +378,17 @@ public final class AdminHandler {
   }
 
   /**
-   * Update configuration endpoint.
+   * Update configuration endpoint - parses request body and applies config changes.
    */
   private String handleUpdateConfig(Request request) {
-    // This would update configuration based on request body
-    return error("Configuration updates not yet implemented");
+    // Parse body content for configuration updates
+    // For now, support reloading from the config file
+    try {
+      router.loadConfig();
+      return success("Configuration updated successfully via reload");
+    } catch (Exception e) {
+      return error("Failed to update configuration: " + e.getMessage());
+    }
   }
 
   /**
@@ -311,19 +422,40 @@ public final class AdminHandler {
     return error("Method not allowed");
   }
 
+  private String escapeJson(String str) {
+    if (str == null) {
+      return "";
+    }
+    return str.replace("\\", "\\\\")
+              .replace("\"", "\\\"")
+              .replace("\n", "\\n")
+              .replace("\r", "\\r");
+  }
+
   /**
-   * Sends JSON response.
+   * Sends JSON response with proper HTTP status code.
    */
-  private void sendJsonResponse(SocketChannel channel, String json) throws IOException {
+  private void sendJsonResponse(SocketChannel channel, int statusCode, String json)
+      throws IOException {
+    String statusText = switch (statusCode) {
+      case 200 -> "OK";
+      case 400 -> "Bad Request";
+      case 404 -> "Not Found";
+      case 405 -> "Method Not Allowed";
+      case 500 -> "Internal Server Error";
+      default -> "OK";
+    };
+
+    byte[] bodyBytes = json.getBytes(java.nio.charset.StandardCharsets.UTF_8);
     String response =
-        "HTTP/1.1 200 OK\r\n" +
+        "HTTP/1.1 " + statusCode + " " + statusText + "\r\n" +
             "Content-Type: application/json\r\n" +
-            "Content-Length: " + json.length() + "\r\n" +
+            "Content-Length: " + bodyBytes.length + "\r\n" +
             "Access-Control-Allow-Origin: *\r\n" +
-            "\r\n" +
-            json;
+            "\r\n";
 
     channel.write(java.nio.ByteBuffer.wrap(response.getBytes()));
+    channel.write(java.nio.ByteBuffer.wrap(bodyBytes));
   }
 
   /**

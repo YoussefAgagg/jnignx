@@ -28,6 +28,7 @@ public final class ServerConfig {
 
   // Load Balancer
   private final String loadBalancerAlgorithm;
+  private final Map<String, Integer> backendWeights;
 
   // Rate Limiter
   private final boolean rateLimiterEnabled;
@@ -46,6 +47,9 @@ public final class ServerConfig {
   private final int healthCheckTimeoutSeconds;
   private final int healthCheckFailureThreshold;
   private final int healthCheckSuccessThreshold;
+  private final String healthCheckPath;
+  private final int healthCheckExpectedStatusMin;
+  private final int healthCheckExpectedStatusMax;
 
   // CORS
   private final CorsConfig corsConfig;
@@ -67,6 +71,7 @@ public final class ServerConfig {
   private ServerConfig(Builder builder) {
     this.routes = Map.copyOf(builder.routes);
     this.loadBalancerAlgorithm = builder.loadBalancerAlgorithm;
+    this.backendWeights = Map.copyOf(builder.backendWeights);
 
     this.rateLimiterEnabled = builder.rateLimiterEnabled;
     this.rateLimitRequestsPerSecond = builder.rateLimitRequestsPerSecond;
@@ -82,6 +87,9 @@ public final class ServerConfig {
     this.healthCheckTimeoutSeconds = builder.healthCheckTimeoutSeconds;
     this.healthCheckFailureThreshold = builder.healthCheckFailureThreshold;
     this.healthCheckSuccessThreshold = builder.healthCheckSuccessThreshold;
+    this.healthCheckPath = builder.healthCheckPath;
+    this.healthCheckExpectedStatusMin = builder.healthCheckExpectedStatusMin;
+    this.healthCheckExpectedStatusMax = builder.healthCheckExpectedStatusMax;
 
     this.corsConfig = builder.corsConfig;
     this.adminAuth = builder.adminAuth;
@@ -107,6 +115,10 @@ public final class ServerConfig {
 
   public String loadBalancerAlgorithm() {
     return loadBalancerAlgorithm;
+  }
+
+  public Map<String, Integer> backendWeights() {
+    return backendWeights;
   }
 
   public boolean rateLimiterEnabled() {
@@ -157,6 +169,18 @@ public final class ServerConfig {
     return healthCheckSuccessThreshold;
   }
 
+  public String healthCheckPath() {
+    return healthCheckPath;
+  }
+
+  public int healthCheckExpectedStatusMin() {
+    return healthCheckExpectedStatusMin;
+  }
+
+  public int healthCheckExpectedStatusMax() {
+    return healthCheckExpectedStatusMax;
+  }
+
   public CorsConfig corsConfig() {
     return corsConfig;
   }
@@ -205,6 +229,7 @@ public final class ServerConfig {
 
     // Defaults
     private String loadBalancerAlgorithm = "round-robin";
+    private Map<String, Integer> backendWeights = Map.of();
 
     private boolean rateLimiterEnabled = false;
     private int rateLimitRequestsPerSecond = 1000;
@@ -220,6 +245,9 @@ public final class ServerConfig {
     private int healthCheckTimeoutSeconds = 5;
     private int healthCheckFailureThreshold = 3;
     private int healthCheckSuccessThreshold = 2;
+    private String healthCheckPath = "/";
+    private int healthCheckExpectedStatusMin = 200;
+    private int healthCheckExpectedStatusMax = 399;
 
     private CorsConfig corsConfig = CorsConfig.disabled();
     private AdminAuth adminAuth = new AdminAuth();
@@ -240,6 +268,11 @@ public final class ServerConfig {
 
     public Builder loadBalancerAlgorithm(String algorithm) {
       this.loadBalancerAlgorithm = algorithm;
+      return this;
+    }
+
+    public Builder backendWeights(Map<String, Integer> weights) {
+      this.backendWeights = weights;
       return this;
     }
 
@@ -266,6 +299,17 @@ public final class ServerConfig {
       this.healthCheckTimeoutSeconds = timeoutSeconds;
       this.healthCheckFailureThreshold = failureThreshold;
       this.healthCheckSuccessThreshold = successThreshold;
+      return this;
+    }
+
+    public Builder healthCheckPath(String path) {
+      this.healthCheckPath = path;
+      return this;
+    }
+
+    public Builder healthCheckExpectedStatus(int min, int max) {
+      this.healthCheckExpectedStatusMin = min;
+      this.healthCheckExpectedStatusMax = max;
       return this;
     }
 

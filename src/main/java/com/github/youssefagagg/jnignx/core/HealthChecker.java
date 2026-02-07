@@ -21,25 +21,103 @@ import java.util.concurrent.atomic.AtomicInteger;
  *
  * <p><b>Features:</b>
  * <ul>
- *   <li><b>Active Checks:</b> Periodic HTTP GET requests to verify backend availability</li>
+ *   <li><b>Active Checks:</b> Periodic HTTP requests to verify backend availability</li>
  *   <li><b>Passive Checks:</b> Track error rates from actual proxy requests</li>
  *   <li><b>Automatic Recovery:</b> Unhealthy backends are periodically re-checked</li>
- *   <li><b>Circuit Breaker:</b> Fast failure for known-bad backends</li>
+ *   <li><b>Configurable Health Check Path:</b> Custom health endpoint (e.g., /healthz)</li>
+ *   <li><b>Expected Status Codes:</b> Configurable acceptable response codes</li>
+ *   <li><b>Config Integration:</b> Reads parameters from ServerConfig</li>
  * </ul>
  */
 public final class HealthChecker {
 
-  private static final int CHECK_INTERVAL_MS = 10_000; // 10 seconds
-  private static final int TIMEOUT_MS = 5_000; // 5 seconds
-  private static final int FAILURE_THRESHOLD = 3; // Mark unhealthy after 3 failures
-  private static final int SUCCESS_THRESHOLD = 2; // Mark healthy after 2 successes
+  // Defaults (used when no config provided)
+  private static final int DEFAULT_CHECK_INTERVAL_MS = 10_000;
+  private static final int DEFAULT_TIMEOUT_MS = 5_000;
+  private static final int DEFAULT_FAILURE_THRESHOLD = 3;
+  private static final int DEFAULT_SUCCESS_THRESHOLD = 2;
+  private static final String DEFAULT_HEALTH_CHECK_PATH = "/";
+  private static final int DEFAULT_EXPECTED_STATUS_MIN = 200;
+  private static final int DEFAULT_EXPECTED_STATUS_MAX = 399;
 
   private final Map<String, BackendHealth> healthMap;
   private volatile boolean running;
 
+  // Configurable parameters
+  private int checkIntervalMs;
+  private int timeoutMs;
+  private int failureThreshold;
+  private int successThreshold;
+  private String healthCheckPath;
+  private int expectedStatusMin;
+  private int expectedStatusMax;
+
   public HealthChecker() {
     this.healthMap = new ConcurrentHashMap<>();
     this.running = true;
+    this.checkIntervalMs = DEFAULT_CHECK_INTERVAL_MS;
+    this.timeoutMs = DEFAULT_TIMEOUT_MS;
+    this.failureThreshold = DEFAULT_FAILURE_THRESHOLD;
+    this.successThreshold = DEFAULT_SUCCESS_THRESHOLD;
+    this.healthCheckPath = DEFAULT_HEALTH_CHECK_PATH;
+    this.expectedStatusMin = DEFAULT_EXPECTED_STATUS_MIN;
+    this.expectedStatusMax = DEFAULT_EXPECTED_STATUS_MAX;
+  }
+
+  /**
+   * Configures health check parameters.
+   *
+   * @param intervalSeconds  check interval in seconds
+   * @param timeoutSeconds   connection timeout in seconds
+   * @param failureThreshold consecutive failures to mark unhealthy
+   * @param successThreshold consecutive successes to mark healthy
+   */
+  public void configure(int intervalSeconds, int timeoutSeconds,
+                        int failureThreshold, int successThreshold) {
+    this.checkIntervalMs = intervalSeconds * 1000;
+    this.timeoutMs = timeoutSeconds * 1000;
+    this.failureThreshold = failureThreshold;
+    this.successThreshold = successThreshold;
+  }
+
+  /**
+   * Gets the configured health check path.
+   *
+   * @return the health check path
+   */
+  public String getHealthCheckPath() {
+    return healthCheckPath;
+  }
+
+  /**
+   * Sets the health check path.
+   *
+   * @param path the path to check (e.g., "/healthz", "/ready")
+   */
+  public void setHealthCheckPath(String path) {
+    if (path != null && !path.isBlank()) {
+      this.healthCheckPath = path.startsWith("/") ? path : "/" + path;
+    }
+  }
+
+  /**
+   * Sets the expected status code range for healthy responses.
+   *
+   * @param min minimum acceptable status code (inclusive)
+   * @param max maximum acceptable status code (inclusive)
+   */
+  public void setExpectedStatusRange(int min, int max) {
+    this.expectedStatusMin = min;
+    this.expectedStatusMax = max;
+  }
+
+  /**
+   * Gets the expected status code range.
+   *
+   * @return array with [min, max] status codes
+   */
+  public int[] getExpectedStatusRange() {
+    return new int[] {expectedStatusMin, expectedStatusMax};
   }
 
   /**
@@ -50,15 +128,18 @@ public final class HealthChecker {
   public void start(List<String> backends) {
     // Initialize health entries
     for (String backend : backends) {
-      healthMap.putIfAbsent(backend, new BackendHealth());
+      healthMap.putIfAbsent(backend, new BackendHealth(failureThreshold, successThreshold));
     }
 
     // Start health check loop
     Thread.startVirtualThread(() -> {
       System.out.println("[HealthChecker] Started monitoring " + backends.size() + " backends");
+      System.out.println("[HealthChecker] Health check path: " + healthCheckPath);
+      System.out.println("[HealthChecker] Expected status: " + expectedStatusMin + "-" +
+                             expectedStatusMax);
       while (running) {
         try {
-          Thread.sleep(CHECK_INTERVAL_MS);
+          Thread.sleep(checkIntervalMs);
           checkAllBackends();
         } catch (InterruptedException e) {
           Thread.currentThread().interrupt();
@@ -99,13 +180,14 @@ public final class HealthChecker {
       int port = uri.getPort() != -1 ? uri.getPort() : 80;
 
       try (SocketChannel channel = SocketChannel.open()) {
-        channel.socket().setSoTimeout(TIMEOUT_MS);
+        channel.socket().setSoTimeout(timeoutMs);
         channel.connect(new InetSocketAddress(host, port));
 
-        // Send simple HEAD request
-        String request = "HEAD / HTTP/1.1\r\n" +
+        // Send HEAD request to configured path
+        String request = "HEAD " + healthCheckPath + " HTTP/1.1\r\n" +
             "Host: " + host + "\r\n" +
             "Connection: close\r\n" +
+            "User-Agent: JNignx-HealthChecker/1.0\r\n" +
             "\r\n";
 
         ByteBuffer buffer = ByteBuffer.wrap(request.getBytes(StandardCharsets.UTF_8));
@@ -121,13 +203,16 @@ public final class HealthChecker {
           buffer.flip();
           String response = StandardCharsets.UTF_8.decode(buffer).toString();
 
-          // Check for 2xx or 3xx status
-          if (response.contains("HTTP/1.1 2") || response.contains("HTTP/1.1 3")) {
+          // Parse status code from response
+          int statusCode = parseStatusCode(response);
+          if (statusCode >= expectedStatusMin && statusCode <= expectedStatusMax) {
             health.recordSuccess();
-            System.out.println("[HealthChecker] ✓ " + backendUrl + " is healthy");
+            System.out.println(
+                "[HealthChecker] ✓ " + backendUrl + " is healthy (status: " + statusCode + ")");
           } else {
-            health.recordFailure("Non-2xx/3xx response");
-            System.out.println("[HealthChecker] ✗ " + backendUrl + " returned error status");
+            health.recordFailure("Unexpected status code: " + statusCode);
+            System.out.println(
+                "[HealthChecker] ✗ " + backendUrl + " returned status " + statusCode);
           }
         } else {
           health.recordFailure("No response");
@@ -138,6 +223,27 @@ public final class HealthChecker {
       health.recordFailure(e.getMessage());
       System.out.println("[HealthChecker] ✗ " + backendUrl + " failed: " + e.getMessage());
     }
+  }
+
+  /**
+   * Parses HTTP status code from response string.
+   */
+  private int parseStatusCode(String response) {
+    // Response format: "HTTP/1.1 200 OK\r\n..."
+    try {
+      int spaceIdx = response.indexOf(' ');
+      if (spaceIdx >= 0) {
+        int nextSpace = response.indexOf(' ', spaceIdx + 1);
+        if (nextSpace < 0) {
+          nextSpace = response.indexOf('\r', spaceIdx + 1);
+        }
+        if (nextSpace > spaceIdx) {
+          return Integer.parseInt(response.substring(spaceIdx + 1, nextSpace).trim());
+        }
+      }
+    } catch (NumberFormatException ignored) {
+    }
+    return -1; // Unknown
   }
 
   /**
@@ -192,7 +298,7 @@ public final class HealthChecker {
    * @param backendUrl the backend URL to register
    */
   public void registerBackend(String backendUrl) {
-    healthMap.putIfAbsent(backendUrl, new BackendHealth());
+    healthMap.putIfAbsent(backendUrl, new BackendHealth(failureThreshold, successThreshold));
   }
 
   /**
@@ -220,6 +326,17 @@ public final class HealthChecker {
     private volatile boolean healthy = true;
     private volatile Instant lastCheck = Instant.now();
     private volatile String lastError = null;
+    private final int failureThreshold;
+    private final int successThreshold;
+
+    public BackendHealth() {
+      this(DEFAULT_FAILURE_THRESHOLD, DEFAULT_SUCCESS_THRESHOLD);
+    }
+
+    public BackendHealth(int failureThreshold, int successThreshold) {
+      this.failureThreshold = failureThreshold;
+      this.successThreshold = successThreshold;
+    }
 
     public boolean isHealthy() {
       return healthy;
@@ -227,6 +344,10 @@ public final class HealthChecker {
 
     public int getConsecutiveFailures() {
       return consecutiveFailures.get();
+    }
+
+    public int getConsecutiveSuccesses() {
+      return consecutiveSuccesses.get();
     }
 
     public String getLastError() {
@@ -243,7 +364,7 @@ public final class HealthChecker {
       lastError = null;
       lastCheck = Instant.now();
 
-      if (consecutiveSuccesses.get() >= SUCCESS_THRESHOLD) {
+      if (consecutiveSuccesses.get() >= successThreshold) {
         healthy = true;
       }
     }
@@ -254,7 +375,7 @@ public final class HealthChecker {
       lastError = error;
       lastCheck = Instant.now();
 
-      if (consecutiveFailures.get() >= FAILURE_THRESHOLD) {
+      if (consecutiveFailures.get() >= failureThreshold) {
         healthy = false;
       }
     }

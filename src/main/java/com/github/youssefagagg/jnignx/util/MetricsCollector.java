@@ -17,6 +17,10 @@ import java.util.concurrent.atomic.LongAdder;
  *   <li>Request duration histograms</li>
  *   <li>HTTP status code counts</li>
  *   <li>Bytes sent/received</li>
+ *   <li>Per-backend request counts and latency</li>
+ *   <li>Circuit breaker state changes</li>
+ *   <li>Rate limiter rejections</li>
+ *   <li>Connection duration tracking</li>
  * </ul>
  *
  * <p>Metrics can be exported in Prometheus text format via the /metrics endpoint.
@@ -39,6 +43,22 @@ public final class MetricsCollector {
   private final Instant startTime = Instant.now();
 
   private final LongAdder[] durationBuckets = new LongAdder[DURATION_BUCKETS.length];
+
+  // Backend-specific metrics
+  private final Map<String, LongAdder> backendRequestCounts = new ConcurrentHashMap<>();
+  private final Map<String, LongAdder> backendErrorCounts = new ConcurrentHashMap<>();
+  private final Map<String, LongAdder> backendLatencySum = new ConcurrentHashMap<>();
+
+  // Circuit breaker metrics
+  private final LongAdder circuitBreakerStateChanges = new LongAdder();
+  private final Map<String, LongAdder> circuitBreakerOpenCounts = new ConcurrentHashMap<>();
+
+  // Rate limiter metrics
+  private final LongAdder rateLimitRejections = new LongAdder();
+
+  // Connection duration tracking
+  private final LongAdder totalConnectionDurationMs = new LongAdder();
+  private final LongAdder totalConnectionCount = new LongAdder();
 
   private MetricsCollector() {
     for (int i = 0; i < durationBuckets.length; i++) {
@@ -78,6 +98,51 @@ public final class MetricsCollector {
   }
 
   /**
+   * Records a backend request with latency tracking.
+   *
+   * @param backend    the backend URL
+   * @param durationMs the request duration in milliseconds
+   * @param success    whether the request was successful
+   */
+  public void recordBackendRequest(String backend, long durationMs, boolean success) {
+    backendRequestCounts.computeIfAbsent(backend, _ -> new LongAdder()).increment();
+    backendLatencySum.computeIfAbsent(backend, _ -> new LongAdder()).add(durationMs);
+    if (!success) {
+      backendErrorCounts.computeIfAbsent(backend, _ -> new LongAdder()).increment();
+    }
+  }
+
+  /**
+   * Records a circuit breaker state change.
+   *
+   * @param backend the backend URL
+   * @param toOpen  true if transitioning to OPEN state
+   */
+  public void recordCircuitBreakerStateChange(String backend, boolean toOpen) {
+    circuitBreakerStateChanges.increment();
+    if (toOpen) {
+      circuitBreakerOpenCounts.computeIfAbsent(backend, _ -> new LongAdder()).increment();
+    }
+  }
+
+  /**
+   * Records a rate limit rejection.
+   */
+  public void recordRateLimitRejection() {
+    rateLimitRejections.increment();
+  }
+
+  /**
+   * Records connection duration when a connection closes.
+   *
+   * @param durationMs the connection duration in milliseconds
+   */
+  public void recordConnectionDuration(long durationMs) {
+    totalConnectionDurationMs.add(durationMs);
+    totalConnectionCount.increment();
+  }
+
+  /**
    * Increments the active connection counter.
    */
   public void incrementActiveConnections() {
@@ -103,6 +168,36 @@ public final class MetricsCollector {
    */
   public long getTotalRequests() {
     return totalRequests.sum();
+  }
+
+  /**
+   * Gets the total bytes sent.
+   */
+  public long getTotalBytesSent() {
+    return bytesSent.sum();
+  }
+
+  /**
+   * Gets the total bytes received.
+   */
+  public long getTotalBytesReceived() {
+    return bytesReceived.sum();
+  }
+
+  /**
+   * Gets the total rate limit rejections.
+   */
+  public long getTotalRateLimitRejections() {
+    return rateLimitRejections.sum();
+  }
+
+  /**
+   * Gets backend request counts.
+   */
+  public Map<String, Long> getBackendRequestCounts() {
+    Map<String, Long> result = new ConcurrentHashMap<>();
+    backendRequestCounts.forEach((k, v) -> result.put(k, v.sum()));
+    return result;
   }
 
   /**
@@ -179,6 +274,86 @@ public final class MetricsCollector {
                   .append(entry.getValue().sum())
                   .append("\n");
               });
+    sb.append("\n");
+
+    // Backend-specific metrics
+    sb.append(
+        "# HELP nanoserver_backend_requests_total Total requests per backend\n");
+    sb.append("# TYPE nanoserver_backend_requests_total counter\n");
+    for (Map.Entry<String, LongAdder> entry : backendRequestCounts.entrySet()) {
+      String backend = entry.getKey().replace("\\", "\\\\").replace("\"", "\\\"");
+      sb.append("nanoserver_backend_requests_total{backend=\"")
+        .append(backend)
+        .append("\"} ")
+        .append(entry.getValue().sum())
+        .append("\n");
+    }
+    sb.append("\n");
+
+    sb.append(
+        "# HELP nanoserver_backend_errors_total Total errors per backend\n");
+    sb.append("# TYPE nanoserver_backend_errors_total counter\n");
+    for (Map.Entry<String, LongAdder> entry : backendErrorCounts.entrySet()) {
+      String backend = entry.getKey().replace("\\", "\\\\").replace("\"", "\\\"");
+      sb.append("nanoserver_backend_errors_total{backend=\"")
+        .append(backend)
+        .append("\"} ")
+        .append(entry.getValue().sum())
+        .append("\n");
+    }
+    sb.append("\n");
+
+    sb.append(
+        "# HELP nanoserver_backend_latency_ms_sum Total latency per backend in milliseconds\n");
+    sb.append("# TYPE nanoserver_backend_latency_ms_sum counter\n");
+    for (Map.Entry<String, LongAdder> entry : backendLatencySum.entrySet()) {
+      String backend = entry.getKey().replace("\\", "\\\\").replace("\"", "\\\"");
+      sb.append("nanoserver_backend_latency_ms_sum{backend=\"")
+        .append(backend)
+        .append("\"} ")
+        .append(entry.getValue().sum())
+        .append("\n");
+    }
+    sb.append("\n");
+
+    // Circuit breaker metrics
+    sb.append(
+        "# HELP nanoserver_circuit_breaker_state_changes_total Circuit breaker state changes\n");
+    sb.append("# TYPE nanoserver_circuit_breaker_state_changes_total counter\n");
+    sb.append("nanoserver_circuit_breaker_state_changes_total ")
+      .append(circuitBreakerStateChanges.sum()).append("\n\n");
+
+    sb.append(
+        "# HELP nanoserver_circuit_breaker_open_total Times circuit opened per backend\n");
+    sb.append("# TYPE nanoserver_circuit_breaker_open_total counter\n");
+    for (Map.Entry<String, LongAdder> entry : circuitBreakerOpenCounts.entrySet()) {
+      String backend = entry.getKey().replace("\\", "\\\\").replace("\"", "\\\"");
+      sb.append("nanoserver_circuit_breaker_open_total{backend=\"")
+        .append(backend)
+        .append("\"} ")
+        .append(entry.getValue().sum())
+        .append("\n");
+    }
+    sb.append("\n");
+
+    // Rate limiter metrics
+    sb.append(
+        "# HELP nanoserver_rate_limit_rejections_total Total rate-limited requests\n");
+    sb.append("# TYPE nanoserver_rate_limit_rejections_total counter\n");
+    sb.append("nanoserver_rate_limit_rejections_total ")
+      .append(rateLimitRejections.sum()).append("\n\n");
+
+    // Connection duration
+    sb.append(
+        "# HELP nanoserver_connection_duration_ms_sum Total connection duration in milliseconds\n");
+    sb.append("# TYPE nanoserver_connection_duration_ms_sum counter\n");
+    sb.append("nanoserver_connection_duration_ms_sum ")
+      .append(totalConnectionDurationMs.sum()).append("\n");
+    sb.append(
+        "# HELP nanoserver_connection_duration_ms_count Total number of connections\n");
+    sb.append("# TYPE nanoserver_connection_duration_ms_count counter\n");
+    sb.append("nanoserver_connection_duration_ms_count ")
+      .append(totalConnectionCount.sum()).append("\n\n");
 
     return sb.toString();
   }
@@ -197,5 +372,13 @@ public final class MetricsCollector {
     for (LongAdder bucket : durationBuckets) {
       bucket.reset();
     }
+    backendRequestCounts.clear();
+    backendErrorCounts.clear();
+    backendLatencySum.clear();
+    circuitBreakerStateChanges.reset();
+    circuitBreakerOpenCounts.clear();
+    rateLimitRejections.reset();
+    totalConnectionDurationMs.reset();
+    totalConnectionCount.reset();
   }
 }

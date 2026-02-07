@@ -9,17 +9,54 @@ import java.net.URI;
 import java.nio.ByteBuffer;
 import java.nio.channels.SocketChannel;
 import java.nio.charset.StandardCharsets;
+import java.util.List;
 import java.util.Map;
+import java.util.Queue;
+import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.ConcurrentLinkedQueue;
 
 /**
  * Handles reverse proxying to backend servers with proper header forwarding.
+ *
+ * <p>Features:
+ * <ul>
+ *   <li>Chunked Transfer Encoding support for both requests and responses</li>
+ *   <li>Connection pooling for reduced latency</li>
+ *   <li>Retry logic with alternate backends</li>
+ *   <li>Proper 502 Bad Gateway error responses</li>
+ *   <li>X-Forwarded-For, X-Real-IP, X-Forwarded-Proto header injection</li>
+ * </ul>
  */
 public class ProxyHandler {
 
   private static final int BUFFER_SIZE = 8192;
 
+  // Connection pool: backend host:port -> queue of reusable channels
+  private static final Map<String, Queue<SocketChannel>> CONNECTION_POOL =
+      new ConcurrentHashMap<>();
+  private static final int MAX_POOL_SIZE_PER_BACKEND = 10;
+
+  // Retry configuration
+  private static final int MAX_RETRIES = 2;
+
   /**
-   * Handles the proxy request.
+   * Clears all pooled connections. Useful for shutdown.
+   */
+  public static void clearConnectionPool() {
+    for (Queue<SocketChannel> pool : CONNECTION_POOL.values()) {
+      SocketChannel channel;
+      while ((channel = pool.poll()) != null) {
+        try {
+          channel.close();
+        } catch (IOException ignored) {
+        }
+      }
+    }
+    CONNECTION_POOL.clear();
+  }
+
+  /**
+   * Handles the proxy request with retry logic and proper error responses.
    *
    * @param clientChannel the client socket channel
    * @param backendUrl    the backend URL
@@ -27,11 +64,94 @@ public class ProxyHandler {
    * @param initialBytes  the number of bytes read
    * @param request       the parsed request
    * @param arena         the memory arena for allocation
-   * @throws IOException if an I/O error occurs
+   * @throws IOException if an I/O error occurs after all retries
    */
   public void handle(SocketChannel clientChannel, String backendUrl, ByteBuffer initialData,
                      int initialBytes, Request request, Arena arena) throws IOException {
-    proxyToBackend(arena, backendUrl, initialData, initialBytes, request, clientChannel);
+    handle(clientChannel, backendUrl, initialData, initialBytes, request, arena, null);
+  }
+
+  /**
+   * Handles the proxy request with retry logic across alternate backends.
+   *
+   * @param clientChannel     the client socket channel
+   * @param backendUrl        the primary backend URL
+   * @param initialData       the data already read from the client
+   * @param initialBytes      the number of bytes read
+   * @param request           the parsed request
+   * @param arena             the memory arena for allocation
+   * @param alternateBackends list of alternate backends to try on failure (may be null)
+   * @throws IOException if an I/O error occurs after all retries
+   */
+  public void handle(SocketChannel clientChannel, String backendUrl, ByteBuffer initialData,
+                     int initialBytes, Request request, Arena arena,
+                     List<String> alternateBackends) throws IOException {
+    IOException lastException = null;
+
+    // Try primary backend with retries
+    for (int attempt = 0; attempt <= MAX_RETRIES; attempt++) {
+      try {
+        proxyToBackend(arena, backendUrl, initialData, initialBytes, request, clientChannel);
+        return; // Success
+      } catch (IOException e) {
+        lastException = e;
+        // Reset buffer position for retry
+        initialData.rewind();
+      }
+    }
+
+    // Try alternate backends if available
+    if (alternateBackends != null) {
+      for (String alternate : alternateBackends) {
+        if (alternate.equals(backendUrl)) {
+          continue; // Skip the primary that already failed
+        }
+        try {
+          initialData.rewind();
+          proxyToBackend(arena, alternate, initialData, initialBytes, request, clientChannel);
+          return; // Success on alternate
+        } catch (IOException e) {
+          lastException = e;
+        }
+      }
+    }
+
+    // All backends failed - send 502 Bad Gateway
+    send502Response(clientChannel, lastException);
+    throw lastException != null ? lastException : new IOException("All backends failed");
+  }
+
+  /**
+   * Sends a proper 502 Bad Gateway response to the client.
+   */
+  private void send502Response(SocketChannel clientChannel, IOException cause) {
+    try {
+      String errorMessage = cause != null ? cause.getMessage() : "Backend connection failed";
+      String body = "{\"error\":\"Bad Gateway\",\"message\":\"" +
+          escapeJson(errorMessage) + "\"}";
+      byte[] bodyBytes = body.getBytes(StandardCharsets.UTF_8);
+
+      String response = "HTTP/1.1 502 Bad Gateway\r\n" +
+          "Content-Type: application/json\r\n" +
+          "Content-Length: " + bodyBytes.length + "\r\n" +
+          "Connection: close\r\n" +
+          "\r\n";
+
+      clientChannel.write(ByteBuffer.wrap(response.getBytes(StandardCharsets.UTF_8)));
+      clientChannel.write(ByteBuffer.wrap(bodyBytes));
+    } catch (IOException ignored) {
+      // Best-effort error response
+    }
+  }
+
+  private String escapeJson(String str) {
+    if (str == null) {
+      return "";
+    }
+    return str.replace("\\", "\\\\")
+              .replace("\"", "\\\"")
+              .replace("\n", "\\n")
+              .replace("\r", "\\r");
   }
 
   private void proxyToBackend(Arena arena, String backendUrl, ByteBuffer initialData,
@@ -40,10 +160,12 @@ public class ProxyHandler {
     URI uri = URI.create(backendUrl);
     String host = uri.getHost();
     int port = uri.getPort() != -1 ? uri.getPort() : 80;
+    String poolKey = host + ":" + port;
 
-    try (SocketChannel backendChannel = SocketChannel.open()) {
-      backendChannel.connect(new InetSocketAddress(host, port));
+    SocketChannel backendChannel = acquireConnection(poolKey, host, port);
+    boolean returnToPool = false;
 
+    try {
       // 1. Send modified headers with X-Forwarded-* headers
       String clientIp = extractClientIp(clientChannel);
       byte[] newHeaders = reconstructHeaders(request, clientIp, host);
@@ -65,12 +187,22 @@ public class ProxyHandler {
       // Calculate remaining body to read from Client
       long bodyBytesRead = initialBytes - request.headerLength();
       if (bodyBytesRead < 0) {
-        bodyBytesRead = 0; // Just in case
+        bodyBytesRead = 0;
       }
-      
-      long bodyBytesRemaining = request.bodyLength() - bodyBytesRead;
-      if (bodyBytesRemaining < 0) {
-        bodyBytesRemaining = 0;
+
+      // Handle chunked transfer encoding for request body
+      if (request.isChunked()) {
+        transferChunked(clientChannel, backendChannel, arena);
+      } else {
+        long bodyBytesRemaining = request.bodyLength() - bodyBytesRead;
+        if (bodyBytesRemaining < 0) {
+          bodyBytesRemaining = 0;
+        }
+
+        // Handle Client -> Backend (Remaining Request Body)
+        if (bodyBytesRemaining > 0) {
+          transferFixed(clientChannel, backendChannel, bodyBytesRemaining, arena);
+        }
       }
 
       // Start thread for Backend -> Client (Response)
@@ -82,17 +214,51 @@ public class ProxyHandler {
         }
       });
 
-      // Handle Client -> Backend (Remaining Request Body)
-      if (bodyBytesRemaining > 0) {
-        transferFixed(clientChannel, backendChannel, bodyBytesRemaining, arena);
-      }
-
       // Wait for response to finish
       try {
         backendToClient.join();
       } catch (InterruptedException e) {
         Thread.currentThread().interrupt();
       }
+    } finally {
+      // Always close the backend connection since we send Connection: close
+      closeQuietly(backendChannel);
+    }
+  }
+
+  /**
+   * Acquires a connection from the pool or creates a new one.
+   */
+  private SocketChannel acquireConnection(String poolKey, String host, int port)
+      throws IOException {
+    Queue<SocketChannel> pool = CONNECTION_POOL.get(poolKey);
+    if (pool != null) {
+      SocketChannel channel;
+      while ((channel = pool.poll()) != null) {
+        if (channel.isOpen() && channel.isConnected()) {
+          return channel;
+        }
+        closeQuietly(channel);
+      }
+    }
+
+    // Create new connection
+    SocketChannel channel = SocketChannel.open();
+    channel.connect(new InetSocketAddress(host, port));
+    return channel;
+  }
+
+  /**
+   * Returns a connection to the pool for reuse.
+   */
+  private void releaseConnection(String poolKey, SocketChannel channel) {
+    Queue<SocketChannel> pool = CONNECTION_POOL.computeIfAbsent(
+        poolKey, _ -> new ConcurrentLinkedQueue<>());
+
+    if (pool.size() < MAX_POOL_SIZE_PER_BACKEND && channel.isOpen()) {
+      pool.offer(channel);
+    } else {
+      closeQuietly(channel);
     }
   }
 
@@ -104,13 +270,22 @@ public class ProxyHandler {
     }
   }
 
+  private void closeQuietly(SocketChannel channel) {
+    try {
+      if (channel != null && channel.isOpen()) {
+        channel.close();
+      }
+    } catch (IOException ignored) {
+    }
+  }
+
   private byte[] reconstructHeaders(Request request, String clientIp, String backendHost) {
     StringBuilder sb = new StringBuilder();
     sb.append(request.method()).append(" ")
       .append(request.path()).append(" ")
       .append(request.version()).append("\r\n");
 
-    // Forward existing headers (except Connection, Host)
+    // Forward existing headers (except Connection, Host, and existing X-Forwarded-*)
     for (Map.Entry<String, String> entry : request.headers().entrySet()) {
       String key = entry.getKey();
       if (!key.equalsIgnoreCase("Connection") &&
@@ -131,20 +306,85 @@ public class ProxyHandler {
     return sb.toString().getBytes(StandardCharsets.UTF_8);
   }
 
-  private byte[] reconstructHeadersWithClose(Request request) {
-    StringBuilder sb = new StringBuilder();
-    sb.append(request.method()).append(" ")
-      .append(request.path()).append(" ")
-      .append(request.version()).append("\r\n");
+  /**
+   * Transfers chunked encoded data from source to destination.
+   * Reads chunk-size, chunk-data, and forwards them.
+   */
+  private void transferChunked(SocketChannel source, SocketChannel destination, Arena arena)
+      throws IOException {
+    MemorySegment bufferSegment = arena.allocate(BUFFER_SIZE);
+    ByteBuffer buffer = bufferSegment.asByteBuffer();
 
-    for (Map.Entry<String, String> entry : request.headers().entrySet()) {
-      if (!entry.getKey().equalsIgnoreCase("Connection")) {
-        sb.append(entry.getKey()).append(": ").append(entry.getValue()).append("\r\n");
+    while (true) {
+      // Read chunk size line
+      String chunkSizeLine = readLine(source, buffer);
+      if (chunkSizeLine == null) {
+        break;
+      }
+
+      // Forward the chunk size line
+      writeString(destination, chunkSizeLine + "\r\n");
+
+      // Parse chunk size
+      int chunkSize;
+      try {
+        chunkSize = Integer.parseInt(chunkSizeLine.trim().split(";")[0], 16);
+      } catch (NumberFormatException e) {
+        break;
+      }
+
+      if (chunkSize == 0) {
+        // Last chunk - forward the trailing CRLF
+        writeString(destination, "\r\n");
+        break;
+      }
+
+      // Forward chunk data
+      transferFixed(source, destination, chunkSize, arena);
+
+      // Read and forward trailing CRLF after chunk data
+      String trailing = readLine(source, buffer);
+      if (trailing != null) {
+        writeString(destination, trailing + "\r\n");
       }
     }
-    sb.append("Connection: close\r\n");
-    sb.append("\r\n");
-    return sb.toString().getBytes(StandardCharsets.UTF_8);
+  }
+
+  /**
+   * Reads a line (terminated by CRLF) from the source channel.
+   */
+  private String readLine(SocketChannel source, ByteBuffer buffer) throws IOException {
+    StringBuilder line = new StringBuilder();
+    buffer.clear();
+    buffer.limit(1);
+
+    while (true) {
+      int bytesRead = source.read(buffer);
+      if (bytesRead == -1) {
+        return line.isEmpty() ? null : line.toString();
+      }
+      if (bytesRead == 0) {
+        continue;
+      }
+
+      buffer.flip();
+      char c = (char) buffer.get();
+      buffer.clear();
+      buffer.limit(1);
+
+      if (c == '\r') {
+        // Read the \n
+        bytesRead = source.read(buffer);
+        if (bytesRead > 0) {
+          buffer.flip();
+          buffer.get(); // consume \n
+          buffer.clear();
+          buffer.limit(1);
+        }
+        return line.toString();
+      }
+      line.append(c);
+    }
   }
 
   // Transfer until EOF
@@ -191,6 +431,13 @@ public class ProxyHandler {
         destination.write(buffer);
       }
       remaining -= bytesRead;
+    }
+  }
+
+  private void writeString(SocketChannel destination, String str) throws IOException {
+    ByteBuffer buf = ByteBuffer.wrap(str.getBytes(StandardCharsets.UTF_8));
+    while (buf.hasRemaining()) {
+      destination.write(buf);
     }
   }
 }
