@@ -1,5 +1,6 @@
 package com.github.youssefagagg.jnignx.handlers;
 
+import com.github.youssefagagg.jnignx.core.ClientConnection;
 import com.github.youssefagagg.jnignx.http.Request;
 import java.io.IOException;
 import java.net.URI;
@@ -49,19 +50,19 @@ public final class WebSocketHandler {
   }
 
   /**
-   * Handles WebSocket upgrade and proxying.
+   * Handles WebSocket upgrade and proxying through a ClientConnection.
    *
-   * @param clientChannel the client socket channel
-   * @param request       the upgrade request
-   * @param backendUrl    the backend WebSocket URL
+   * @param conn       the client connection (may be TLS)
+   * @param request    the upgrade request
+   * @param backendUrl the backend WebSocket URL
    */
-  public static void handleWebSocket(SocketChannel clientChannel, Request request,
+  public static void handleWebSocket(ClientConnection conn, Request request,
                                      String backendUrl)
       throws IOException {
 
     String key = request.headers().get("sec-websocket-key");
     if (key == null) {
-      sendBadRequest(clientChannel);
+      sendBadRequest(conn);
       return;
     }
 
@@ -89,10 +90,19 @@ public final class WebSocketHandler {
             "Sec-WebSocket-Accept: " + acceptKey + "\r\n" +
             "\r\n";
 
-    clientChannel.write(ByteBuffer.wrap(upgradeResponse.getBytes()));
+    conn.write(ByteBuffer.wrap(upgradeResponse.getBytes()));
 
     // Start bidirectional proxying
-    startBidirectionalProxy(clientChannel, backendChannel);
+    startBidirectionalProxy(conn, backendChannel);
+  }
+
+  /**
+   * Backward-compatible overload that wraps a raw SocketChannel.
+   */
+  public static void handleWebSocket(SocketChannel clientChannel, Request request,
+                                     String backendUrl)
+      throws IOException {
+    handleWebSocket(new ClientConnection(clientChannel), request, backendUrl);
   }
 
   /**
@@ -133,20 +143,20 @@ public final class WebSocketHandler {
   /**
    * Starts bidirectional proxying between client and backend.
    */
-  private static void startBidirectionalProxy(SocketChannel client, SocketChannel backend) {
-    // Client -> Backend (in current virtual thread)
+  private static void startBidirectionalProxy(ClientConnection client, SocketChannel backend) {
+    // Client -> Backend (in virtual thread)
     CompletableFuture<Void> clientToBackend = CompletableFuture.runAsync(() -> {
       try {
-        proxyFrames(client, backend);
+        proxyClientToBackend(client, backend);
       } catch (IOException e) {
         // Connection closed
       }
     }, Thread::startVirtualThread);
 
-    // Backend -> Client (in new virtual thread)
+    // Backend -> Client (in virtual thread)
     CompletableFuture<Void> backendToClient = CompletableFuture.runAsync(() -> {
       try {
-        proxyFrames(backend, client);
+        proxyBackendToClient(backend, client);
       } catch (IOException e) {
         // Connection closed
       }
@@ -156,15 +166,19 @@ public final class WebSocketHandler {
     try {
       CompletableFuture.anyOf(clientToBackend, backendToClient).join();
     } finally {
-      closeQuietly(client);
+      try {
+        client.close();
+      } catch (IOException ignored) {
+      }
       closeQuietly(backend);
     }
   }
 
   /**
-   * Proxies WebSocket frames from source to destination.
+   * Proxies data from client (possibly TLS) to backend (plain).
    */
-  private static void proxyFrames(SocketChannel source, SocketChannel dest) throws IOException {
+  private static void proxyClientToBackend(ClientConnection source, SocketChannel dest)
+      throws IOException {
     ByteBuffer buffer = ByteBuffer.allocate(65536);
 
     while (true) {
@@ -180,6 +194,26 @@ public final class WebSocketHandler {
       while (buffer.hasRemaining()) {
         dest.write(buffer);
       }
+    }
+  }
+
+  /**
+   * Proxies data from backend (plain) to client (possibly TLS).
+   */
+  private static void proxyBackendToClient(SocketChannel source, ClientConnection dest)
+      throws IOException {
+    ByteBuffer buffer = ByteBuffer.allocate(65536);
+
+    while (true) {
+      buffer.clear();
+      int bytesRead = source.read(buffer);
+
+      if (bytesRead == -1) {
+        break;
+      }
+
+      buffer.flip();
+      dest.write(buffer);
     }
   }
 
@@ -275,9 +309,9 @@ public final class WebSocketHandler {
     channel.write(buffer);
   }
 
-  private static void sendBadRequest(SocketChannel channel) throws IOException {
+  private static void sendBadRequest(ClientConnection conn) throws IOException {
     String response = "HTTP/1.1 400 Bad Request\r\n\r\n";
-    channel.write(ByteBuffer.wrap(response.getBytes()));
+    conn.write(ByteBuffer.wrap(response.getBytes()));
   }
 
   private static void closeQuietly(SocketChannel channel) {

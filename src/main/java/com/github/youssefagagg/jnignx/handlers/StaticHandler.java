@@ -1,5 +1,6 @@
 package com.github.youssefagagg.jnignx.handlers;
 
+import com.github.youssefagagg.jnignx.core.ClientConnection;
 import com.github.youssefagagg.jnignx.http.Request;
 import java.io.IOException;
 import java.io.OutputStream;
@@ -97,18 +98,18 @@ public class StaticHandler {
   /**
    * Serves a static file or directory.
    *
-   * @param clientChannel the client socket channel
-   * @param rootPath      the root directory path (e.g., "file:///var/www/html")
-   * @param request       the parsed request
+   * @param conn     the client connection
+   * @param rootPath the root directory path (e.g., "file:///var/www/html")
+   * @param request  the parsed request
    * @throws IOException if an I/O error occurs
    */
-  public void handle(SocketChannel clientChannel, String rootPath, Request request)
+  public void handle(ClientConnection conn, String rootPath, Request request)
       throws IOException {
     String requestPath = request.path();
 
     // Basic security check
     if (requestPath.contains("..")) {
-      sendError(clientChannel, 403, "Forbidden");
+      sendError(conn, 403, "Forbidden");
       return;
     }
 
@@ -122,28 +123,36 @@ public class StaticHandler {
 
     // Ensure the file is actually under the root
     if (!file.startsWith(root)) {
-      sendError(clientChannel, 403, "Forbidden");
+      sendError(conn, 403, "Forbidden");
       return;
     }
 
     if (!Files.exists(file)) {
-      handle404(clientChannel);
+      handle404(conn);
       return;
     }
 
     if (Files.isDirectory(file)) {
       Path indexFile = file.resolve("index.html");
       if (Files.exists(indexFile)) {
-        serveFile(clientChannel, indexFile, request);
+        serveFile(conn, indexFile, request);
       } else {
-        serveDirectoryListing(clientChannel, file, requestPath);
+        serveDirectoryListing(conn, file, requestPath);
       }
     } else {
-      serveFile(clientChannel, file, request);
+      serveFile(conn, file, request);
     }
   }
 
-  private void serveDirectoryListing(SocketChannel clientChannel, Path dir, String requestPath)
+  /**
+   * Backward-compatible overload that wraps a raw SocketChannel.
+   */
+  public void handle(SocketChannel clientChannel, String rootPath, Request request)
+      throws IOException {
+    handle(new ClientConnection(clientChannel), rootPath, request);
+  }
+
+  private void serveDirectoryListing(ClientConnection conn, Path dir, String requestPath)
       throws IOException {
     StringBuilder html = new StringBuilder();
     html.append("<!DOCTYPE html><html><head><title>Index of ").append(requestPath)
@@ -172,11 +181,11 @@ public class StaticHandler {
         "Content-Length: " + data.length + "\r\n" +
         "\r\n";
 
-    clientChannel.write(ByteBuffer.wrap(header.getBytes(StandardCharsets.UTF_8)));
-    clientChannel.write(ByteBuffer.wrap(data));
+    conn.write(ByteBuffer.wrap(header.getBytes(StandardCharsets.UTF_8)));
+    conn.write(ByteBuffer.wrap(data));
   }
 
-  private void serveFile(SocketChannel clientChannel, Path file, Request request)
+  private void serveFile(ClientConnection conn, Path file, Request request)
       throws IOException {
     long length = Files.size(file);
     String contentType = determineContentType(file);
@@ -187,14 +196,14 @@ public class StaticHandler {
         "\"" + Long.toHexString(lastModifiedTime) + "-" + Long.toHexString(length) + "\"";
 
     // Check conditional requests (If-None-Match / If-Modified-Since)
-    if (checkConditional(clientChannel, request, etag, lastModifiedTime)) {
+    if (checkConditional(conn, request, etag, lastModifiedTime)) {
       return; // 304 Not Modified was sent
     }
 
     // Check for Range requests
     String rangeHeader = request.headers().get("Range");
     if (rangeHeader != null && rangeHeader.startsWith("bytes=")) {
-      serveRangeRequest(clientChannel, file, length, contentType, lastModified, etag, rangeHeader);
+      serveRangeRequest(conn, file, length, contentType, lastModified, etag, rangeHeader);
       return;
     }
 
@@ -203,9 +212,9 @@ public class StaticHandler {
     boolean useGzip = acceptEncoding.contains("gzip") && COMPRESSIBLE_TYPES.contains(contentType);
 
     if (useGzip) {
-      serveFileGzip(clientChannel, file, contentType, lastModified, etag);
+      serveFileGzip(conn, file, contentType, lastModified, etag);
     } else {
-      serveFileZeroCopy(clientChannel, file, length, contentType, lastModified, etag);
+      serveFileZeroCopy(conn, file, length, contentType, lastModified, etag);
     }
   }
 
@@ -214,19 +223,19 @@ public class StaticHandler {
    *
    * @return true if 304 was sent, false if the request should proceed normally
    */
-  private boolean checkConditional(SocketChannel clientChannel, Request request,
+  private boolean checkConditional(ClientConnection conn, Request request,
                                    String etag, long lastModifiedTime) throws IOException {
     // Check If-None-Match (takes precedence over If-Modified-Since)
     String ifNoneMatch = request.headers().get("If-None-Match");
     if (ifNoneMatch != null) {
       if (ifNoneMatch.equals(etag) || ifNoneMatch.equals("*")) {
-        send304(clientChannel, etag, lastModifiedTime);
+        send304(conn, etag, lastModifiedTime);
         return true;
       }
       // Check comma-separated list of ETags
       for (String tag : ifNoneMatch.split(",")) {
         if (tag.trim().equals(etag)) {
-          send304(clientChannel, etag, lastModifiedTime);
+          send304(conn, etag, lastModifiedTime);
           return true;
         }
       }
@@ -240,7 +249,7 @@ public class StaticHandler {
         Instant serverDate = Instant.ofEpochMilli(lastModifiedTime);
         // Compare at second precision (HTTP dates don't have sub-second)
         if (!serverDate.isAfter(clientDate.plusSeconds(1))) {
-          send304(clientChannel, etag, lastModifiedTime);
+          send304(conn, etag, lastModifiedTime);
           return true;
         }
       } catch (Exception ignored) {
@@ -254,7 +263,7 @@ public class StaticHandler {
   /**
    * Sends a 304 Not Modified response.
    */
-  private void send304(SocketChannel clientChannel, String etag, long lastModifiedTime)
+  private void send304(ClientConnection conn, String etag, long lastModifiedTime)
       throws IOException {
     String lastModified = HTTP_DATE_FORMATTER.format(Instant.ofEpochMilli(lastModifiedTime));
     String response = "HTTP/1.1 304 Not Modified\r\n" +
@@ -262,14 +271,14 @@ public class StaticHandler {
         "Last-Modified: " + lastModified + "\r\n" +
         "Cache-Control: public, max-age=3600\r\n" +
         "\r\n";
-    clientChannel.write(ByteBuffer.wrap(response.getBytes(StandardCharsets.UTF_8)));
+    conn.write(ByteBuffer.wrap(response.getBytes(StandardCharsets.UTF_8)));
   }
 
   /**
    * Serves a range request (partial content).
    * Supports single byte ranges like "bytes=0-499" or "bytes=500-" or "bytes=-500".
    */
-  private void serveRangeRequest(SocketChannel clientChannel, Path file, long fileSize,
+  private void serveRangeRequest(ClientConnection conn, Path file, long fileSize,
                                  String contentType, String lastModified, String etag,
                                  String rangeHeader) throws IOException {
     // Parse range: "bytes=start-end"
@@ -294,11 +303,11 @@ public class StaticHandler {
         end = Long.parseLong(parts[1]);
       } else {
         // Invalid range
-        sendError(clientChannel, 416, "Range Not Satisfiable");
+        sendError(conn, 416, "Range Not Satisfiable");
         return;
       }
     } catch (NumberFormatException e) {
-      sendError(clientChannel, 416, "Range Not Satisfiable");
+      sendError(conn, 416, "Range Not Satisfiable");
       return;
     }
 
@@ -308,7 +317,7 @@ public class StaticHandler {
           "Content-Range: bytes */" + fileSize + "\r\n" +
           "Content-Length: 0\r\n" +
           "\r\n";
-      clientChannel.write(ByteBuffer.wrap(errorResponse.getBytes(StandardCharsets.UTF_8)));
+      conn.write(ByteBuffer.wrap(errorResponse.getBytes(StandardCharsets.UTF_8)));
       return;
     }
 
@@ -324,22 +333,43 @@ public class StaticHandler {
         "Cache-Control: public, max-age=3600\r\n" +
         "\r\n";
 
-    clientChannel.write(ByteBuffer.wrap(header.getBytes(StandardCharsets.UTF_8)));
+    conn.write(ByteBuffer.wrap(header.getBytes(StandardCharsets.UTF_8)));
 
+    // Read file and write through connection (supports TLS)
     try (FileChannel fileChannel = FileChannel.open(file, StandardOpenOption.READ)) {
-      long transferred = 0;
-      while (transferred < contentLength) {
-        long count = fileChannel.transferTo(start + transferred,
-                                            contentLength - transferred, clientChannel);
-        if (count <= 0) {
-          break;
+      if (conn.isTls()) {
+        // Cannot use zero-copy with TLS — read into buffer and write through connection
+        ByteBuffer buf = ByteBuffer.allocate(8192);
+        long remaining = contentLength;
+        fileChannel.position(start);
+        while (remaining > 0) {
+          buf.clear();
+          if (remaining < buf.capacity()) {
+            buf.limit((int) remaining);
+          }
+          int read = fileChannel.read(buf);
+          if (read <= 0) {
+            break;
+          }
+          buf.flip();
+          conn.write(buf);
+          remaining -= read;
         }
-        transferred += count;
+      } else {
+        long transferred = 0;
+        while (transferred < contentLength) {
+          long count = fileChannel.transferTo(start + transferred,
+                                              contentLength - transferred, conn.rawChannel());
+          if (count <= 0) {
+            break;
+          }
+          transferred += count;
+        }
       }
     }
   }
 
-  private void serveFileZeroCopy(SocketChannel clientChannel, Path file, long length,
+  private void serveFileZeroCopy(ClientConnection conn, Path file, long length,
                                  String contentType, String lastModified, String etag)
       throws IOException {
     String header = "HTTP/1.1 200 OK\r\n" +
@@ -352,21 +382,31 @@ public class StaticHandler {
         "Vary: Accept-Encoding\r\n" +
         "\r\n";
 
-    clientChannel.write(ByteBuffer.wrap(header.getBytes(StandardCharsets.UTF_8)));
+    conn.write(ByteBuffer.wrap(header.getBytes(StandardCharsets.UTF_8)));
 
     try (FileChannel fileChannel = FileChannel.open(file, StandardOpenOption.READ)) {
-      long transferred = 0;
-      while (transferred < length) {
-        long count = fileChannel.transferTo(transferred, length - transferred, clientChannel);
-        if (count <= 0) {
-          break;
+      if (conn.isTls()) {
+        // Cannot use zero-copy with TLS — read into buffer and write through connection
+        ByteBuffer buf = ByteBuffer.allocate(8192);
+        while (fileChannel.read(buf) > 0) {
+          buf.flip();
+          conn.write(buf);
+          buf.clear();
         }
-        transferred += count;
+      } else {
+        long transferred = 0;
+        while (transferred < length) {
+          long count = fileChannel.transferTo(transferred, length - transferred, conn.rawChannel());
+          if (count <= 0) {
+            break;
+          }
+          transferred += count;
+        }
       }
     }
   }
 
-  private void serveFileGzip(SocketChannel clientChannel, Path file, String contentType,
+  private void serveFileGzip(ClientConnection conn, Path file, String contentType,
                              String lastModified, String etag) throws IOException {
     // We use Chunked Transfer Encoding for Gzip to avoid buffering the whole compressed content
     String header = "HTTP/1.1 200 OK\r\n" +
@@ -379,11 +419,11 @@ public class StaticHandler {
         "Vary: Accept-Encoding\r\n" +
         "\r\n";
 
-    clientChannel.write(ByteBuffer.wrap(header.getBytes(StandardCharsets.UTF_8)));
+    conn.write(ByteBuffer.wrap(header.getBytes(StandardCharsets.UTF_8)));
 
-    // Stream file -> Gzip -> Chunked -> Socket
+    // Stream file -> Gzip -> Chunked -> Connection
     try (FileChannel fileChannel = FileChannel.open(file, StandardOpenOption.READ);
-         ChunkedOutputStream chunkedOut = new ChunkedOutputStream(clientChannel);
+         ChunkedOutputStream chunkedOut = new ChunkedOutputStream(conn);
          GZIPOutputStream gzipOut = new GZIPOutputStream(chunkedOut, 8192)) {
 
       ByteBuffer buffer = ByteBuffer.allocate(8192);
@@ -396,15 +436,22 @@ public class StaticHandler {
     }
   }
 
-  public void handle404(SocketChannel clientChannel) throws IOException {
-    sendError(clientChannel, 404, "Not Found");
+  public void handle404(ClientConnection conn) throws IOException {
+    sendError(conn, 404, "Not Found");
   }
 
-  private void sendError(SocketChannel clientChannel, int code, String message) throws IOException {
+  /**
+   * Backward-compatible overload that wraps a raw SocketChannel.
+   */
+  public void handle404(SocketChannel clientChannel) throws IOException {
+    handle404(new ClientConnection(clientChannel));
+  }
+
+  private void sendError(ClientConnection conn, int code, String message) throws IOException {
     // Check for custom error page
     Path customPage = CUSTOM_ERROR_PAGES.get(code);
     if (customPage != null && Files.exists(customPage)) {
-      serveCustomErrorPage(clientChannel, code, message, customPage);
+      serveCustomErrorPage(conn, code, message, customPage);
       return;
     }
 
@@ -420,19 +467,19 @@ public class StaticHandler {
         "Content-Type: text/html\r\n" +
         "Content-Length: " + bodyBytes.length + "\r\n" +
         "\r\n";
-    clientChannel.write(ByteBuffer.wrap(response.getBytes(StandardCharsets.UTF_8)));
-    clientChannel.write(ByteBuffer.wrap(bodyBytes));
+    conn.write(ByteBuffer.wrap(response.getBytes(StandardCharsets.UTF_8)));
+    conn.write(ByteBuffer.wrap(bodyBytes));
   }
 
-  private void serveCustomErrorPage(SocketChannel clientChannel, int code, String message,
+  private void serveCustomErrorPage(ClientConnection conn, int code, String message,
                                     Path customPage) throws IOException {
     byte[] bodyBytes = Files.readAllBytes(customPage);
     String response = "HTTP/1.1 " + code + " " + message + "\r\n" +
         "Content-Type: text/html\r\n" +
         "Content-Length: " + bodyBytes.length + "\r\n" +
         "\r\n";
-    clientChannel.write(ByteBuffer.wrap(response.getBytes(StandardCharsets.UTF_8)));
-    clientChannel.write(ByteBuffer.wrap(bodyBytes));
+    conn.write(ByteBuffer.wrap(response.getBytes(StandardCharsets.UTF_8)));
+    conn.write(ByteBuffer.wrap(bodyBytes));
   }
 
   private String determineContentType(Path path) {
@@ -446,13 +493,13 @@ public class StaticHandler {
   }
 
   /**
-   * A simple OutputStream that writes data in HTTP chunks.
+   * A simple OutputStream that writes data in HTTP chunks through a ClientConnection.
    */
   private static class ChunkedOutputStream extends OutputStream {
-    private final SocketChannel channel;
+    private final ClientConnection conn;
 
-    ChunkedOutputStream(SocketChannel channel) {
-      this.channel = channel;
+    ChunkedOutputStream(ClientConnection conn) {
+      this.conn = conn;
     }
 
     @Override
@@ -467,20 +514,20 @@ public class StaticHandler {
       }
       // Write chunk size in hex
       String sizeLine = Integer.toHexString(len) + "\r\n";
-      channel.write(ByteBuffer.wrap(sizeLine.getBytes(StandardCharsets.US_ASCII)));
+      conn.write(ByteBuffer.wrap(sizeLine.getBytes(StandardCharsets.US_ASCII)));
 
       // Write data
-      channel.write(ByteBuffer.wrap(b, off, len));
+      conn.write(ByteBuffer.wrap(b, off, len));
 
       // Write CRLF
-      channel.write(ByteBuffer.wrap("\r\n".getBytes(StandardCharsets.US_ASCII)));
+      conn.write(ByteBuffer.wrap("\r\n".getBytes(StandardCharsets.US_ASCII)));
     }
 
     @Override
     public void close() throws IOException {
       // Write end chunk
-      channel.write(ByteBuffer.wrap("0\r\n\r\n".getBytes(StandardCharsets.US_ASCII)));
-      // Do not close the channel here, as it's managed by the worker
+      conn.write(ByteBuffer.wrap("0\r\n\r\n".getBytes(StandardCharsets.US_ASCII)));
+      // Do not close the connection here, as it's managed by the worker
     }
   }
 }

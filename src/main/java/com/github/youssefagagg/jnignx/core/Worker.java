@@ -196,6 +196,9 @@ public class Worker implements Runnable {
       }
     }
 
+    // Create ClientConnection that wraps channel + optional SSL session
+    ClientConnection conn = new ClientConnection(clientChannel, sslSession);
+
     // Allocate buffer for reading request
     MemorySegment bufferSegment = arena.allocate(8192);
     ByteBuffer buffer = bufferSegment.asByteBuffer();
@@ -226,12 +229,7 @@ public class Worker implements Runnable {
       if (request == null) {
         try {
           while (buffer.hasRemaining()) {
-            int bytesRead;
-            if (sslSession != null) {
-              bytesRead = sslSession.read(buffer);
-            } else {
-              bytesRead = clientChannel.read(buffer);
-            }
+            int bytesRead = conn.read(buffer);
 
             if (bytesRead == -1) {
               return; // EOF
@@ -277,7 +275,7 @@ public class Worker implements Runnable {
       if (corsConfig.isEnabled() && "OPTIONS".equalsIgnoreCase(method)) {
         String requestMethod = request.headers().get("Access-Control-Request-Method");
         if (CorsConfig.isPreflight(method, origin, requestMethod)) {
-          sendCorsPreflightResponse(clientChannel, sslSession, corsConfig, origin, requestMethod,
+          sendCorsPreflightResponse(conn, corsConfig, origin, requestMethod,
                                     request.headers().get("Access-Control-Request-Headers"));
           long duration = System.currentTimeMillis() - startTime;
           AccessLogger.logAccess(requestId, clientIp, method, path, 204, duration, 0, userAgent,
@@ -292,7 +290,7 @@ public class Worker implements Runnable {
 
       // Apply rate limiting (only if enabled in config)
       if (serverConfig.rateLimiterEnabled() && !rateLimiter.allowRequest(clientIp, path)) {
-        sendRateLimitResponse(clientChannel, sslSession, corsConfig, origin, method, clientIp,
+        sendRateLimitResponse(conn, corsConfig, origin, method, clientIp,
                               path);
         long duration = System.currentTimeMillis() - startTime;
         AccessLogger.logAccess(requestId, clientIp, method, path, 429, duration, 0, userAgent,
@@ -307,7 +305,7 @@ public class Worker implements Runnable {
       if (AdminHandler.isAdminRequest(path)) {
         // Admin API must be explicitly enabled in config
         if (!serverConfig.adminEnabled()) {
-          new StaticHandler().handle404(clientChannel);
+          new StaticHandler().handle404(conn);
           long duration = System.currentTimeMillis() - startTime;
           AccessLogger.logAccess(requestId, clientIp, method, path, 404, duration, 0, userAgent,
                                  "admin-disabled");
@@ -322,7 +320,7 @@ public class Worker implements Runnable {
         if (adminAuth.isEnabled()) {
           String authHeader = request.headers().get("Authorization");
           if (!adminAuth.authenticate(authHeader, clientIp)) {
-            sendUnauthorizedResponse(clientChannel, sslSession, adminAuth, corsConfig, origin,
+            sendUnauthorizedResponse(conn, adminAuth, corsConfig, origin,
                                      method);
             long duration = System.currentTimeMillis() - startTime;
             AccessLogger.logAccess(requestId, clientIp, method, path, 401, duration, 0, userAgent,
@@ -332,7 +330,7 @@ public class Worker implements Runnable {
           }
         }
 
-        adminHandler.handle(clientChannel, request);
+        adminHandler.handle(conn, request);
         long duration = System.currentTimeMillis() - startTime;
         AccessLogger.logAccess(requestId, clientIp, method, path, 200, duration, 0, userAgent,
                                "admin");
@@ -345,7 +343,7 @@ public class Worker implements Runnable {
 
       // Check for metrics endpoint
       if ("/metrics".equals(path)) {
-        serveMetrics(clientChannel, sslSession);
+        serveMetrics(conn);
         long duration = System.currentTimeMillis() - startTime;
         AccessLogger.logAccess(requestId, clientIp, method, path, 200, duration, 0, userAgent,
                                "internal");
@@ -358,7 +356,7 @@ public class Worker implements Runnable {
 
       // Check for health endpoint
       if ("/health".equals(path)) {
-        serveHealth(clientChannel, sslSession);
+        serveHealth(conn);
         long duration = System.currentTimeMillis() - startTime;
         AccessLogger.logAccess(requestId, clientIp, method, path, 200, duration, 0, userAgent,
                                "internal");
@@ -378,7 +376,7 @@ public class Worker implements Runnable {
       if (backend != null) {
         // Check circuit breaker
         if (!circuitBreaker.allowRequest(backend)) {
-          sendServiceUnavailable(clientChannel, sslSession, corsConfig, origin, method);
+          sendServiceUnavailable(conn, corsConfig, origin, method);
           long duration = System.currentTimeMillis() - startTime;
           AccessLogger.logAccess(requestId, clientIp, method, path, 503, duration, 0, userAgent,
                                  "circuit-open");
@@ -392,19 +390,19 @@ public class Worker implements Runnable {
         try {
           // Check for WebSocket upgrade
           if (WebSocketHandler.isWebSocketUpgrade(request)) {
-            WebSocketHandler.handleWebSocket(clientChannel, request, backend);
+            WebSocketHandler.handleWebSocket(conn, request, backend);
             circuitBreaker.recordSuccess(backend);
             metrics.recordBackendRequest(backend,
                                          System.currentTimeMillis() - backendStartTime, true);
             // WebSocket takes over connection, so we break loop
             break;
           } else if (backend.startsWith("file://")) {
-            new StaticHandler().handle(clientChannel, backend, request);
+            new StaticHandler().handle(conn, backend, request);
             circuitBreaker.recordSuccess(backend);
             metrics.recordBackendRequest(backend,
                                          System.currentTimeMillis() - backendStartTime, true);
           } else {
-            new ProxyHandler().handle(clientChannel, backend, buffer, totalBytesRead, request,
+            new ProxyHandler().handle(conn, backend, buffer, totalBytesRead, request,
                                       arena);
             circuitBreaker.recordSuccess(backend);
             metrics.recordBackendRequest(backend,
@@ -419,14 +417,14 @@ public class Worker implements Runnable {
           status = 502; // Bad Gateway
           AccessLogger.logError("Proxy error", e.getMessage());
           // Send 502 with CORS headers on error responses
-          send502WithCors(clientChannel, sslSession, corsConfig, origin, method);
+          send502WithCors(conn, corsConfig, origin, method);
           break;
         } finally {
           router.recordConnectionEnd(backend);
         }
       } else {
         // 404 Not Found
-        new StaticHandler().handle404(clientChannel);
+        new StaticHandler().handle404(conn);
         status = 404;
       }
 
@@ -443,8 +441,11 @@ public class Worker implements Runnable {
     }
 
     // Close SSL session
-    if (sslWrapper != null) {
-      // SSL cleanup
+    if (sslSession != null) {
+      try {
+        sslSession.close();
+      } catch (IOException ignored) {
+      }
     }
   }
 
@@ -456,41 +457,27 @@ public class Worker implements Runnable {
     }
   }
 
-  private void serveHealth(SocketChannel clientChannel, SslWrapper.SslSession sslSession)
-      throws IOException {
+  private void serveHealth(ClientConnection conn) throws IOException {
     String body = "{\"status\":\"healthy\",\"timestamp\":\"" + java.time.Instant.now() + "\"}";
     String response = "HTTP/1.1 200 OK\r\n" +
         "Content-Type: application/json\r\n" +
         "Content-Length: " + body.length() + "\r\n" +
         "\r\n" +
         body;
-    byte[] data = response.getBytes(StandardCharsets.UTF_8);
-
-    if (sslSession != null) {
-      sslSession.write(ByteBuffer.wrap(data));
-    } else {
-      clientChannel.write(ByteBuffer.wrap(data));
-    }
+    conn.write(ByteBuffer.wrap(response.getBytes(StandardCharsets.UTF_8)));
   }
 
-  private void serveMetrics(SocketChannel clientChannel, SslWrapper.SslSession sslSession)
-      throws IOException {
+  private void serveMetrics(ClientConnection conn) throws IOException {
     String metricsBody = MetricsCollector.getInstance().exportPrometheus();
     String response = "HTTP/1.1 200 OK\r\n" +
         "Content-Type: text/plain; version=0.0.4\r\n" +
         "Content-Length: " + metricsBody.length() + "\r\n" +
         "\r\n" +
         metricsBody;
-    byte[] data = response.getBytes(StandardCharsets.UTF_8);
-
-    if (sslSession != null) {
-      sslSession.write(ByteBuffer.wrap(data));
-    } else {
-      clientChannel.write(ByteBuffer.wrap(data));
-    }
+    conn.write(ByteBuffer.wrap(response.getBytes(StandardCharsets.UTF_8)));
   }
 
-  private void sendRateLimitResponse(SocketChannel clientChannel, SslWrapper.SslSession sslSession,
+  private void sendRateLimitResponse(ClientConnection conn,
                                      CorsConfig corsConfig, String origin, String method,
                                      String clientIp, String path) throws IOException {
     // Get rate limit info for response headers
@@ -518,17 +505,10 @@ public class Worker implements Runnable {
     headers.append("\r\n");
     headers.append(body);
 
-    byte[] data = headers.toString().getBytes(StandardCharsets.UTF_8);
-
-    if (sslSession != null) {
-      sslSession.write(ByteBuffer.wrap(data));
-    } else {
-      clientChannel.write(ByteBuffer.wrap(data));
-    }
+    conn.write(ByteBuffer.wrap(headers.toString().getBytes(StandardCharsets.UTF_8)));
   }
 
-  private void sendCorsPreflightResponse(SocketChannel clientChannel,
-                                         SslWrapper.SslSession sslSession, CorsConfig corsConfig,
+  private void sendCorsPreflightResponse(ClientConnection conn, CorsConfig corsConfig,
                                          String origin, String requestMethod,
                                          String requestHeaders) throws IOException {
     Map<String, String> corsHeaders = corsConfig.getPreflightHeaders(origin, requestMethod,
@@ -542,17 +522,10 @@ public class Worker implements Runnable {
     response.append("Content-Length: 0\r\n");
     response.append("\r\n");
 
-    byte[] data = response.toString().getBytes(StandardCharsets.UTF_8);
-
-    if (sslSession != null) {
-      sslSession.write(ByteBuffer.wrap(data));
-    } else {
-      clientChannel.write(ByteBuffer.wrap(data));
-    }
+    conn.write(ByteBuffer.wrap(response.toString().getBytes(StandardCharsets.UTF_8)));
   }
 
-  private void sendUnauthorizedResponse(SocketChannel clientChannel,
-                                        SslWrapper.SslSession sslSession, AdminAuth adminAuth,
+  private void sendUnauthorizedResponse(ClientConnection conn, AdminAuth adminAuth,
                                         CorsConfig corsConfig, String origin, String method)
       throws IOException {
     StringBuilder response = new StringBuilder();
@@ -574,17 +547,10 @@ public class Worker implements Runnable {
     response.append("\r\n");
     response.append(body);
 
-    byte[] data = response.toString().getBytes(StandardCharsets.UTF_8);
-
-    if (sslSession != null) {
-      sslSession.write(ByteBuffer.wrap(data));
-    } else {
-      clientChannel.write(ByteBuffer.wrap(data));
-    }
+    conn.write(ByteBuffer.wrap(response.toString().getBytes(StandardCharsets.UTF_8)));
   }
 
-  private void sendServiceUnavailable(SocketChannel clientChannel,
-                                      SslWrapper.SslSession sslSession, CorsConfig corsConfig,
+  private void sendServiceUnavailable(ClientConnection conn, CorsConfig corsConfig,
                                       String origin, String method) throws IOException {
     StringBuilder response = new StringBuilder();
     response.append("HTTP/1.1 503 Service Unavailable\r\n");
@@ -605,19 +571,13 @@ public class Worker implements Runnable {
     response.append("\r\n");
     response.append(body);
 
-    byte[] data = response.toString().getBytes(StandardCharsets.UTF_8);
-
-    if (sslSession != null) {
-      sslSession.write(ByteBuffer.wrap(data));
-    } else {
-      clientChannel.write(ByteBuffer.wrap(data));
-    }
+    conn.write(ByteBuffer.wrap(response.toString().getBytes(StandardCharsets.UTF_8)));
   }
 
   /**
    * Sends 502 Bad Gateway with CORS headers on error responses.
    */
-  private void send502WithCors(SocketChannel clientChannel, SslWrapper.SslSession sslSession,
+  private void send502WithCors(ClientConnection conn,
                                CorsConfig corsConfig, String origin, String method)
       throws IOException {
     StringBuilder response = new StringBuilder();
@@ -638,13 +598,7 @@ public class Worker implements Runnable {
     response.append("\r\n");
     response.append(body);
 
-    byte[] data = response.toString().getBytes(StandardCharsets.UTF_8);
-
-    if (sslSession != null) {
-      sslSession.write(ByteBuffer.wrap(data));
-    } else {
-      clientChannel.write(ByteBuffer.wrap(data));
-    }
+    conn.write(ByteBuffer.wrap(response.toString().getBytes(StandardCharsets.UTF_8)));
   }
 
   private void closeQuietly(SocketChannel channel) {

@@ -1,6 +1,7 @@
 package com.github.youssefagagg.jnignx.handlers;
 
 import com.github.youssefagagg.jnignx.core.CircuitBreaker;
+import com.github.youssefagagg.jnignx.core.ClientConnection;
 import com.github.youssefagagg.jnignx.core.HealthChecker;
 import com.github.youssefagagg.jnignx.core.RateLimiter;
 import com.github.youssefagagg.jnignx.core.Router;
@@ -73,7 +74,7 @@ public final class AdminHandler {
   /**
    * Handles admin API requests with proper status codes.
    */
-  public void handle(SocketChannel channel, Request request) throws IOException {
+  public void handle(ClientConnection conn, Request request) throws IOException {
     String path = request.path();
     String method = request.method();
 
@@ -82,44 +83,51 @@ public final class AdminHandler {
 
     // Route to appropriate handler with proper status codes
     switch (routePath) {
-      case "/admin/health" -> sendJsonResponse(channel, 200, handleHealth());
-      case "/admin/metrics" -> sendJsonResponse(channel, 200, handleMetrics());
-      case "/admin/stats" -> sendJsonResponse(channel, 200, handleStats());
-      case "/admin/routes" -> sendJsonResponse(channel, 200, handleRoutes());
+      case "/admin/health" -> sendJsonResponse(conn, 200, handleHealth());
+      case "/admin/metrics" -> sendJsonResponse(conn, 200, handleMetrics());
+      case "/admin/stats" -> sendJsonResponse(conn, 200, handleStats());
+      case "/admin/routes" -> sendJsonResponse(conn, 200, handleRoutes());
       case "/admin/routes/reload" -> {
         if ("POST".equals(method)) {
-          sendJsonResponse(channel, 200, handleReloadRoutes());
+          sendJsonResponse(conn, 200, handleReloadRoutes());
         } else {
-          sendJsonResponse(channel, 405, methodNotAllowed());
+          sendJsonResponse(conn, 405, methodNotAllowed());
         }
       }
-      case "/admin/circuits" -> sendJsonResponse(channel, 200, handleCircuits());
+      case "/admin/circuits" -> sendJsonResponse(conn, 200, handleCircuits());
       case "/admin/circuits/reset" -> {
         if ("POST".equals(method)) {
-          sendJsonResponse(channel, 200, handleResetCircuits(request));
+          sendJsonResponse(conn, 200, handleResetCircuits(request));
         } else {
-          sendJsonResponse(channel, 405, methodNotAllowed());
+          sendJsonResponse(conn, 405, methodNotAllowed());
         }
       }
-      case "/admin/ratelimit" -> sendJsonResponse(channel, 200, handleRateLimit());
+      case "/admin/ratelimit" -> sendJsonResponse(conn, 200, handleRateLimit());
       case "/admin/ratelimit/reset" -> {
         if ("POST".equals(method)) {
-          sendJsonResponse(channel, 200, handleResetRateLimit(request));
+          sendJsonResponse(conn, 200, handleResetRateLimit(request));
         } else {
-          sendJsonResponse(channel, 405, methodNotAllowed());
+          sendJsonResponse(conn, 405, methodNotAllowed());
         }
       }
-      case "/admin/backends" -> sendJsonResponse(channel, 200, handleBackends());
-      case "/admin/config" -> sendJsonResponse(channel, 200, handleConfig());
+      case "/admin/backends" -> sendJsonResponse(conn, 200, handleBackends());
+      case "/admin/config" -> sendJsonResponse(conn, 200, handleConfig());
       case "/admin/config/update" -> {
         if ("POST".equals(method)) {
-          sendJsonResponse(channel, 200, handleUpdateConfig(request));
+          sendJsonResponse(conn, 200, handleUpdateConfig(request));
         } else {
-          sendJsonResponse(channel, 405, methodNotAllowed());
+          sendJsonResponse(conn, 405, methodNotAllowed());
         }
       }
-      default -> sendJsonResponse(channel, 404, notFound());
+      default -> sendJsonResponse(conn, 404, notFound());
     }
+  }
+
+  /**
+   * Backward-compatible overload that wraps a raw SocketChannel.
+   */
+  public void handle(SocketChannel channel, Request request) throws IOException {
+    handle(new ClientConnection(channel), request);
   }
 
   /**
@@ -435,7 +443,7 @@ public final class AdminHandler {
   /**
    * Sends JSON response with proper HTTP status code.
    */
-  private void sendJsonResponse(SocketChannel channel, int statusCode, String json)
+  private void sendJsonResponse(ClientConnection conn, int statusCode, String json)
       throws IOException {
     String statusText = switch (statusCode) {
       case 200 -> "OK";
@@ -454,8 +462,8 @@ public final class AdminHandler {
             "Access-Control-Allow-Origin: *\r\n" +
             "\r\n";
 
-    channel.write(java.nio.ByteBuffer.wrap(response.getBytes()));
-    channel.write(java.nio.ByteBuffer.wrap(bodyBytes));
+    conn.write(java.nio.ByteBuffer.wrap(response.getBytes()));
+    conn.write(java.nio.ByteBuffer.wrap(bodyBytes));
   }
 
   /**
