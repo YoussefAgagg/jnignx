@@ -37,6 +37,7 @@ public class Worker implements Runnable {
   private final SocketChannel clientChannel;
   private final Router router;
   private final SslWrapper sslWrapper;
+  private final byte[] preReadData;
   private final MetricsCollector metrics;
   private final AdminHandler adminHandler;
   private final CircuitBreaker circuitBreaker;
@@ -52,16 +53,33 @@ public class Worker implements Runnable {
    * Creates a Worker without TLS support.
    */
   public Worker(SocketChannel clientChannel, Router router) {
-    this(clientChannel, router, null);
+    this(clientChannel, router, (SslWrapper) null);
   }
 
   /**
    * Creates a Worker with optional TLS support.
    */
   public Worker(SocketChannel clientChannel, Router router, SslWrapper sslWrapper) {
+    this(clientChannel, router, sslWrapper, null);
+  }
+
+  /**
+   * Creates a Worker with pre-read data (for HTTP requests where data was already
+   * consumed from the channel, e.g., after ACME challenge path inspection).
+   */
+  public Worker(SocketChannel clientChannel, Router router, byte[] preReadData) {
+    this(clientChannel, router, null, preReadData);
+  }
+
+  /**
+   * Creates a Worker with optional TLS support and optional pre-read data.
+   */
+  private Worker(SocketChannel clientChannel, Router router, SslWrapper sslWrapper,
+                 byte[] preReadData) {
     this.clientChannel = clientChannel;
     this.router = router;
     this.sslWrapper = sslWrapper;
+    this.preReadData = preReadData;
     this.metrics = MetricsCollector.getInstance();
 
     // Get config from router
@@ -185,6 +203,8 @@ public class Worker implements Runnable {
     // Set timeout for keep-alive
     clientChannel.socket().setSoTimeout(30000); // 30 seconds
 
+    boolean firstIteration = true;
+
     while (clientChannel.isOpen()) {
       long startTime = System.currentTimeMillis();
       buffer.clear();
@@ -194,35 +214,46 @@ public class Worker implements Runnable {
       // Generate request ID for tracing
       String requestId = AccessLogger.generateRequestId();
 
-      // Read request (with SSL if enabled)
-      try {
-        while (buffer.hasRemaining()) {
-          int bytesRead;
-          if (sslSession != null) {
-            bytesRead = sslSession.read(buffer);
-          } else {
-            bytesRead = clientChannel.read(buffer);
-          }
-
-          if (bytesRead == -1) {
-            return; // EOF
-          }
-          if (bytesRead == 0) {
-            // Should not happen with blocking channel unless timeout?
-            continue;
-          }
-          totalBytesRead = buffer.position();
-
-          // Try to parse
-          request = HttpParser.parse(bufferSegment, totalBytesRead);
-          if (request != null) {
-            break;
-          }
-        }
-      } catch (IOException e) {
-        // Timeout or other error
-        break;
+      // If we have pre-read data, use it for the first iteration
+      if (firstIteration && preReadData != null) {
+        firstIteration = false;
+        buffer.put(preReadData, 0, Math.min(preReadData.length, buffer.remaining()));
+        totalBytesRead = buffer.position();
+        request = HttpParser.parse(bufferSegment, totalBytesRead);
       }
+
+      // Read request (with SSL if enabled)
+      if (request == null) {
+        try {
+          while (buffer.hasRemaining()) {
+            int bytesRead;
+            if (sslSession != null) {
+              bytesRead = sslSession.read(buffer);
+            } else {
+              bytesRead = clientChannel.read(buffer);
+            }
+
+            if (bytesRead == -1) {
+              return; // EOF
+            }
+            if (bytesRead == 0) {
+              // Should not happen with blocking channel unless timeout?
+              continue;
+            }
+            totalBytesRead = buffer.position();
+
+            // Try to parse
+            request = HttpParser.parse(bufferSegment, totalBytesRead);
+            if (request != null) {
+              break;
+            }
+          }
+        } catch (IOException e) {
+          // Timeout or other error
+          break;
+        }
+      }
+      firstIteration = false;
 
       if (request == null) {
         // Bad request or incomplete headers

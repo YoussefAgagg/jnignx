@@ -444,7 +444,10 @@ Request and response size limits.
 
 ### `autoHttps`
 
-Enables Caddy-style automatic HTTPS with on-demand certificate provisioning via ACME (Let's Encrypt).
+Enables Caddy-style automatic HTTPS with on-demand certificate provisioning via Let's Encrypt.
+
+JNignx includes a built-in ACME v2 client (RFC 8555) that communicates directly with Let's Encrypt to obtain and
+renew TLS certificates automatically — no external tools like `certbot` or `keytool` required.
 
 When enabled, the server runs in **dual-port mode**: an HTTP port handles ACME HTTP-01 challenges and optionally
 redirects to HTTPS, while the HTTPS port terminates TLS with automatically provisioned certificates.

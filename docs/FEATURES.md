@@ -113,9 +113,10 @@ All strategies filter out unhealthy backends before selection, falling back to a
 - ALPN protocol negotiation (advertises `h2` and `http/1.1`)
 - Loads certificates from PKCS12 or JKS keystores
 - `SslWrapper.SslSession` provides `read()`, `write()`, `doHandshake()`, `close()`, `getNegotiatedProtocol()`
-- **Auto-HTTPS (Caddy-style)** — automatic TLS certificate provisioning and management:
-  - **On-demand certificate provisioning** via ACME (Let's Encrypt) — certificates are obtained automatically when a
-    new domain connects
+- **Auto-HTTPS with Let's Encrypt (Caddy-style)** — automatic TLS certificate provisioning and management:
+  - **Full ACME v2 protocol implementation** (RFC 8555) — pure Java, no external dependencies; communicates directly
+    with Let's Encrypt using JWS-signed requests
+  - **On-demand certificate provisioning** — certificates are obtained automatically when a new domain connects
   - **SNI-based dynamic certificate selection** — `SniKeyManager` extracts the hostname from the TLS ClientHello and
     selects the correct certificate per-domain
   - **Certificate caching** — issued certificates are cached in memory and persisted to disk (PKCS12 keystores)
@@ -128,13 +129,17 @@ All strategies filter out unhealthy backends before selection, falling back to a
   - **HTTP → HTTPS redirect** — HTTP requests are automatically redirected to HTTPS with `301 Moved Permanently`
   - **ACME HTTP-01 challenge handling** — the HTTP listener automatically responds to
     `/.well-known/acme-challenge/<token>` requests during certificate issuance
+  - **CSR generation** — PKCS#10 Certificate Signing Requests are built using pure Java ASN.1 DER encoding with
+    Subject Alternative Names (SAN) for multi-domain support
+  - **PEM certificate chain parsing** — downloaded certificate chains are parsed from PEM format and stored in PKCS12
+    keystores
   - **Disk persistence** — certificates survive restarts; cached `.p12` files are loaded on startup
   - **Staging mode** — use Let's Encrypt staging environment for testing without hitting rate limits
 
 ### Remaining Improvements
 
-- **PEM Certificate Loading** — only Java KeyStore formats are supported; direct PEM/key file loading would be more
-  convenient
+- **PEM Certificate Loading** — only Java KeyStore formats are supported for manual TLS; direct PEM/key file loading
+  would be more convenient
 - **OCSP Stapling** — not implemented
 - **TLS-ALPN-01 Challenge** — only HTTP-01 challenge type is supported; TLS-ALPN-01 would allow cert issuance without
   an HTTP port

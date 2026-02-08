@@ -6,8 +6,8 @@
 A high-performance reverse proxy and web server built with Java 25, leveraging Virtual Threads (Project Loom) and the
 Foreign Function & Memory API (Project Panama) for high concurrency and low-latency I/O.
 
-> **Project Status:** JNignx implements the core features needed for a reverse proxy. Some advanced features (HTTP/2,
-> ACME/Let's Encrypt, Brotli) are partially implemented or stubbed.
+> **Project Status:** JNignx implements the core features needed for a reverse proxy, including automatic HTTPS
+> via Let's Encrypt. Some advanced features (HTTP/2, Brotli) are partially implemented or stubbed.
 > See [Production Readiness](docs/production-readiness.md) for a full gap analysis.
 
 ---
@@ -26,6 +26,8 @@ Foreign Function & Memory API (Project Panama) for high concurrency and low-late
 - **Health Checking** — active (periodic HEAD probes with configurable path and expected status codes) and passive
   (real-traffic failure tracking) with automatic failover and recovery
 - **TLS/HTTPS** — SSL termination via `SSLEngine` with TLS 1.2/1.3 and ALPN negotiation
+- **Automatic HTTPS (Let's Encrypt)** — ACME v2 protocol implementation with on-demand certificate provisioning,
+  SNI-based dynamic cert selection, automatic renewal, HTTP-01 challenges, and HTTP→HTTPS redirect
 - **WebSocket Proxying** — upgrade detection, bidirectional frame-level relay
 - **Rate Limiting** — token-bucket, sliding-window, and fixed-window strategies with `X-RateLimit-*` response headers
 - **Circuit Breaker** — per-backend failure tracking with open/half-open/closed states, shared across all worker
@@ -44,11 +46,10 @@ Foreign Function & Memory API (Project Panama) for high concurrency and low-late
 
 ### Partially Implemented / Stubbed
 
-| Feature              | Status   | Details                                                                                                         |
-|----------------------|----------|-----------------------------------------------------------------------------------------------------------------|
-| HTTP/2               | Stubbed  | Frame parser exists (`Http2Handler`) but lacks HPACK header decoding and is not wired into the request pipeline |
-| ACME (Let's Encrypt) | Skeleton | `AcmeClient` class exists with placeholder methods; no real ACME protocol interaction                           |
-| Brotli Compression   | Fallback | Attempts reflection-based Brotli4j lookup; falls back to gzip when unavailable                                  |
+| Feature            | Status   | Details                                                                                                         |
+|--------------------|----------|-----------------------------------------------------------------------------------------------------------------|
+| HTTP/2             | Stubbed  | Frame parser exists (`Http2Handler`) but lacks HPACK header decoding and is not wired into the request pipeline |
+| Brotli Compression | Fallback | Attempts reflection-based Brotli4j lookup; falls back to gzip when unavailable                                  |
 
 ### Not Yet Implemented
 
@@ -132,10 +133,9 @@ See the [Quick Start Guide](docs/quickstart.md) for detailed setup instructions.
 Contributions are welcome! Priority areas:
 
 1. Complete HTTP/2 support (HPACK decoding, stream multiplexing integration)
-2. Implement real ACME client for automatic HTTPS
-3. Add response caching
-4. Per-route load balancing and rate limiting
-5. Improve test coverage for edge cases
+2. Add response caching
+3. Per-route load balancing and rate limiting
+4. Improve test coverage for edge cases
 
 ## License
 

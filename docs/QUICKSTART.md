@@ -134,6 +134,38 @@ Serve static assets from disk and proxy API calls to a backend:
 }
 ```
 
+### Automatic HTTPS with Let's Encrypt
+
+Enable automatic TLS certificate provisioning — no manual certificate management needed:
+
+```json
+{
+  "routes": {
+    "/": ["http://localhost:3000"]
+  },
+  "domainRoutes": {
+    "app.example.com": ["http://localhost:3000"],
+    "api.example.com": ["http://localhost:8081"]
+  },
+  "autoHttps": {
+    "enabled": true,
+    "email": "admin@example.com",
+    "staging": false,
+    "httpsPort": 443,
+    "httpToHttpsRedirect": true
+  }
+}
+```
+
+Start with:
+
+```bash
+sudo ./gradlew run --args="80 routes.json"
+```
+
+JNignx will automatically obtain certificates from Let's Encrypt, redirect HTTP to HTTPS,
+and renew certificates before they expire. Use `"staging": true` for testing.
+
 ### Full-Featured Setup
 
 Enable rate limiting, circuit breaker, CORS, and admin API:

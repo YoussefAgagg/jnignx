@@ -335,35 +335,66 @@ rotation and re-added when it recovers.
 
 ## Adding HTTPS/TLS
 
-JNignx supports TLS termination. Create a Java KeyStore with your certificate:
+### Automatic HTTPS with Let's Encrypt (Recommended)
+
+JNignx includes a built-in ACME v2 client that automatically obtains and renews TLS certificates
+from Let's Encrypt. Add the `autoHttps` section to your `routes.json`:
+
+```json
+{
+  "routes": {
+    "/": ["http://localhost:3000"]
+  },
+  "domainRoutes": {
+    "app.example.com": ["http://localhost:3000"],
+    "api.example.com": ["http://localhost:8081"]
+  },
+  "autoHttps": {
+    "enabled": true,
+    "email": "admin@example.com",
+    "domains": ["app.example.com", "api.example.com"],
+    "staging": false,
+    "httpsPort": 443,
+    "httpToHttpsRedirect": true,
+    "allowedDomains": ["*.example.com"]
+  }
+}
+```
+
+Start the server (requires ports 80 and 443):
+
+```bash
+sudo java --enable-preview -jar jnignx.jar 80 routes.json
+```
+
+JNignx will:
+
+1. Listen on port 80 for ACME HTTP-01 challenges and HTTP→HTTPS redirects
+2. Listen on port 443 for HTTPS connections
+3. Automatically obtain certificates from Let's Encrypt when a new domain connects
+4. Cache certificates to disk and renew them 30 days before expiration
+
+> **Tip:** Use `"staging": true` during development to avoid Let's Encrypt rate limits.
+
+### Manual TLS with Existing Certificates
+
+If you already have certificates (e.g., from a corporate CA), convert them to PKCS12 format:
 
 ```bash
 # Convert PEM certificate + key to PKCS12
 openssl pkcs12 -export \
-  -in /etc/letsencrypt/live/example.com/fullchain.pem \
-  -inkey /etc/letsencrypt/live/example.com/privkey.pem \
+  -in fullchain.pem \
+  -inkey privkey.pem \
   -out keystore.p12 \
   -name jnignx \
   -password pass:changeit
-
-# Convert to JKS (if needed)
-keytool -importkeystore \
-  -srckeystore keystore.p12 \
-  -srcstoretype PKCS12 \
-  -destkeystore keystore.jks \
-  -deststoretype JKS \
-  -srcstorepass changeit \
-  -deststorepass changeit
 ```
 
-Then start JNignx with TLS on port 443:
+Then use the programmatic API to start with manual TLS:
 
-```bash
-sudo java --enable-preview \
-  -Djavax.net.ssl.keyStore=keystore.p12 \
-  -Djavax.net.ssl.keyStorePassword=changeit \
-  -Djavax.net.ssl.keyStoreType=PKCS12 \
-  -jar jnignx.jar 443 routes.json
+```java
+SslWrapper ssl = new SslWrapper("keystore.p12", "changeit");
+ServerLoop server = new ServerLoop(443, router, ssl);
 ```
 
 ---

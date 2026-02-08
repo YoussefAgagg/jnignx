@@ -343,9 +343,13 @@ public final class SslWrapper {
             while (outNetBuffer.hasRemaining()) {
               channel.write(outNetBuffer);
             }
+            if (wrapResult.getHandshakeStatus() == SSLEngineResult.HandshakeStatus.FINISHED) {
+              handshakeComplete = true;
+            }
             break;
 
           case NEED_UNWRAP:
+            // Read more data from the network if needed
             int bytesRead = channel.read(inNetBuffer);
             if (bytesRead < 0) {
               throw new SSLException("Connection closed during handshake");
@@ -353,6 +357,21 @@ public final class SslWrapper {
             inNetBuffer.flip();
             SSLEngineResult unwrapResult = engine.unwrap(inNetBuffer, inAppBuffer);
             inNetBuffer.compact();
+
+            // Handle BUFFER_UNDERFLOW: need more network data before unwrap can proceed
+            while (unwrapResult.getStatus() == SSLEngineResult.Status.BUFFER_UNDERFLOW) {
+              bytesRead = channel.read(inNetBuffer);
+              if (bytesRead < 0) {
+                throw new SSLException("Connection closed during handshake");
+              }
+              inNetBuffer.flip();
+              unwrapResult = engine.unwrap(inNetBuffer, inAppBuffer);
+              inNetBuffer.compact();
+            }
+
+            if (unwrapResult.getHandshakeStatus() == SSLEngineResult.HandshakeStatus.FINISHED) {
+              handshakeComplete = true;
+            }
             break;
 
           case NEED_TASK:

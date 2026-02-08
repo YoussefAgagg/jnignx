@@ -156,14 +156,24 @@ public class ServerLoop {
   /**
    * Handles HTTP requests on the HTTP port when auto-HTTPS is enabled.
    *
-   * <p>This serves two purposes:
+   * <p>This serves three purposes:
    * <ul>
    *   <li>Respond to ACME HTTP-01 challenges at /.well-known/acme-challenge/</li>
    *   <li>Redirect all other HTTP requests to HTTPS (if redirect is enabled)</li>
+   *   <li>Pass through to normal Worker for plain HTTP when redirect is disabled</li>
    * </ul>
    */
   private void handleHttpRequest(SocketChannel clientChannel) {
+    // If redirect is enabled, we need to peek at the request to extract host/path
+    // If only ACME is needed, we peek to check the path
+    // If neither, pass directly to Worker without consuming data
+    if (!httpToHttpsRedirect && certManager == null) {
+      new Worker(clientChannel, router).run();
+      return;
+    }
+
     try {
+      // Peek at the request to determine how to handle it
       ByteBuffer buffer = ByteBuffer.allocate(4096);
       int bytesRead = clientChannel.read(buffer);
       if (bytesRead <= 0) {
@@ -172,7 +182,9 @@ public class ServerLoop {
       }
       buffer.flip();
 
-      String rawRequest = StandardCharsets.UTF_8.decode(buffer).toString();
+      byte[] rawBytes = new byte[buffer.remaining()];
+      buffer.get(rawBytes);
+      String rawRequest = new String(rawBytes, StandardCharsets.UTF_8);
 
       // Parse the first line to get method and path
       String[] lines = rawRequest.split("\r\n");
@@ -216,10 +228,8 @@ public class ServerLoop {
         return;
       }
 
-      // If no redirect, pass to normal worker
-      // Re-create the buffer for the worker to read
-      buffer.rewind();
-      Thread.startVirtualThread(new Worker(clientChannel, router));
+      // If no redirect, pass to normal worker with pre-read data
+      new Worker(clientChannel, router, rawBytes).run();
 
     } catch (IOException e) {
       closeQuietly(clientChannel);

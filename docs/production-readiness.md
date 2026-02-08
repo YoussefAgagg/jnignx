@@ -233,26 +233,39 @@ scrape_configs:
 
 ### TLS Configuration
 
-```bash
-# Generate self-signed certificate for testing
-keytool -genkeypair \
-  -alias server \
-  -keyalg RSA \
-  -keysize 2048 \
-  -storetype PKCS12 \
-  -keystore keystore.p12 \
-  -validity 365 \
-  -dname "CN=localhost"
+JNignx supports automatic HTTPS via Let's Encrypt. Enable it in your `routes.json`:
+
+```json
+{
+  "routes": {
+    "/": ["http://localhost:3000"]
+  },
+  "autoHttps": {
+    "enabled": true,
+    "email": "admin@example.com",
+    "domains": ["example.com", "www.example.com"],
+    "staging": false,
+    "httpsPort": 443,
+    "httpToHttpsRedirect": true
+  }
+}
 ```
 
-TLS is enabled programmatically:
+This will automatically:
+
+- Obtain TLS certificates from Let's Encrypt using the ACME v2 protocol
+- Handle HTTP-01 challenges on the HTTP port
+- Redirect HTTP traffic to HTTPS
+- Renew certificates automatically before expiration (30 days before)
+
+For testing, set `"staging": true` to use Let's Encrypt's staging environment and avoid rate limits.
+
+For manual TLS with an existing certificate, use the programmatic API:
 
 ```java
 SslWrapper ssl = new SslWrapper("keystore.p12", "password");
 ServerLoop server = new ServerLoop(443, router, ssl);
 ```
-
-> **Note:** There is no configuration file option to enable TLS yet. It requires code changes or a wrapper script.
 
 ---
 

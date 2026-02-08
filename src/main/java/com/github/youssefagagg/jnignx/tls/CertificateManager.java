@@ -237,7 +237,9 @@ public final class CertificateManager {
     AcmeClient acme = new AcmeClient(acmeEmail, staging, domain);
 
     // Set the challenge handler so the server can respond to HTTP-01 challenges
-    // The challenge handler is shared with the server loop
+    // during certificate issuance via the ACME HTTP-01 protocol
+    acme.setChallengeHandler(challengeHandler);
+
     Path keystorePath = acme.obtainCertificate();
 
     // Load the keystore
