@@ -206,6 +206,31 @@ public final class ConfigLoader {
       }
     }
 
+    // Parse autoHttps configuration
+    @SuppressWarnings("unchecked")
+    Map<String, Object> autoHttpsObj = (Map<String, Object>) root.get("autoHttps");
+    if (autoHttpsObj != null) {
+      boolean enabled = parser.getBoolean(autoHttpsObj, "enabled", false);
+      String email = parser.getString(autoHttpsObj, "email");
+      boolean staging = parser.getBoolean(autoHttpsObj, "staging", false);
+      String certDir = parser.getString(autoHttpsObj, "certDir");
+
+      @SuppressWarnings("unchecked")
+      List<String> domains = (List<String>) autoHttpsObj.get("domains");
+
+      builder.autoHttps(enabled, email, domains, staging, certDir);
+
+      int httpsPort = parser.getInt(autoHttpsObj, "httpsPort", 443);
+      builder.httpsPort(httpsPort);
+
+      boolean redirect = parser.getBoolean(autoHttpsObj, "httpToHttpsRedirect", true);
+      builder.httpToHttpsRedirect(redirect);
+
+      @SuppressWarnings("unchecked")
+      List<String> allowedDomains = (List<String>) autoHttpsObj.get("allowedDomains");
+      builder.allowedDomains(allowedDomains);
+    }
+
     return builder.build();
   }
 

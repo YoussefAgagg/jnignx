@@ -43,9 +43,9 @@ This document covers each implemented feature in detail, including current capab
 
 ### Remaining Improvements
 
-- **Wildcard Domains** — no support for `*.example.com` patterns; each subdomain must be listed explicitly
-- **Per-Domain TLS (SNI)** — currently all domains share the same TLS certificate; SNI-based cert selection is not
-  implemented
+- **Wildcard Domains** — no support for `*.example.com` patterns in domain routing; each subdomain must be listed
+  explicitly (note: wildcard patterns *are* supported in the auto-HTTPS `allowedDomains` list for certificate
+  provisioning)
 
 ---
 
@@ -113,16 +113,32 @@ All strategies filter out unhealthy backends before selection, falling back to a
 - ALPN protocol negotiation (advertises `h2` and `http/1.1`)
 - Loads certificates from PKCS12 or JKS keystores
 - `SslWrapper.SslSession` provides `read()`, `write()`, `doHandshake()`, `close()`, `getNegotiatedProtocol()`
+- **Auto-HTTPS (Caddy-style)** — automatic TLS certificate provisioning and management:
+  - **On-demand certificate provisioning** via ACME (Let's Encrypt) — certificates are obtained automatically when a
+    new domain connects
+  - **SNI-based dynamic certificate selection** — `SniKeyManager` extracts the hostname from the TLS ClientHello and
+    selects the correct certificate per-domain
+  - **Certificate caching** — issued certificates are cached in memory and persisted to disk (PKCS12 keystores)
+  - **Automatic renewal** — a background scheduler checks certificates every 12 hours and renews any expiring within
+    30 days
+  - **Domain allowlist** — restrict which domains are eligible for on-demand issuance; supports exact matches and
+    wildcard patterns (`*.example.com`)
+  - **Dual-port mode** — when auto-HTTPS is enabled, the server listens on both an HTTP port (for ACME HTTP-01
+    challenges and optional redirect) and an HTTPS port
+  - **HTTP → HTTPS redirect** — HTTP requests are automatically redirected to HTTPS with `301 Moved Permanently`
+  - **ACME HTTP-01 challenge handling** — the HTTP listener automatically responds to
+    `/.well-known/acme-challenge/<token>` requests during certificate issuance
+  - **Disk persistence** — certificates survive restarts; cached `.p12` files are loaded on startup
+  - **Staging mode** — use Let's Encrypt staging environment for testing without hitting rate limits
 
 ### Remaining Improvements
 
 - **PEM Certificate Loading** — only Java KeyStore formats are supported; direct PEM/key file loading would be more
   convenient
-- **SNI (Server Name Indication)** — no support for serving different certificates based on hostname
 - **OCSP Stapling** — not implemented
-- **Certificate Rotation** — replacing certificates requires server restart; hot-reload of TLS config is not supported
-- **ACME/Let's Encrypt** — `AcmeClient` exists but is a skeleton with placeholder methods; all core ACME operations (
-  account registration, order creation, challenge completion, certificate download) return hardcoded strings
+- **TLS-ALPN-01 Challenge** — only HTTP-01 challenge type is supported; TLS-ALPN-01 would allow cert issuance without
+  an HTTP port
+- **DNS-01 Challenge** — would enable wildcard certificate issuance
 
 ---
 

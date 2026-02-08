@@ -1,7 +1,10 @@
 package com.github.youssefagagg.jnignx;
 
+import com.github.youssefagagg.jnignx.config.ServerConfig;
 import com.github.youssefagagg.jnignx.core.Router;
 import com.github.youssefagagg.jnignx.core.ServerLoop;
+import com.github.youssefagagg.jnignx.tls.CertificateManager;
+import com.github.youssefagagg.jnignx.tls.SslWrapper;
 import java.io.IOException;
 import java.nio.file.Path;
 
@@ -28,6 +31,10 @@ import java.nio.file.Path;
  *
  *   <li><b>Lock-Free Configuration:</b> Route configuration updates use AtomicReference
  *       for lock-free swapping, ensuring zero downtime during hot-reloads.</li>
+ *
+ *   <li><b>Auto-HTTPS (Caddy-style):</b> Automatic certificate provisioning and
+ *       renewal via ACME (Let's Encrypt). Certificates are obtained on-demand
+ *       based on SNI hostname, cached, and auto-renewed before expiration.</li>
  * </ul>
  *
  * <p><b>Why Virtual Threads Instead of Thread Pools or Netty:</b>
@@ -51,6 +58,7 @@ public final class NanoServer {
   private final int port;
   private final Router router;
   private final ServerLoop serverLoop;
+  private final CertificateManager certManager;
 
   /**
    * Creates a new NanoServer with the specified port and configuration file.
@@ -61,7 +69,53 @@ public final class NanoServer {
   public NanoServer(int port, Path configPath) {
     this.port = port;
     this.router = new Router(configPath);
-    this.serverLoop = new ServerLoop(port, router);
+
+    // Load config early to check for auto-HTTPS settings
+    CertificateManager cm = null;
+    ServerLoop sl;
+
+    try {
+      router.loadConfig();
+      ServerConfig config = router.getServerConfig();
+
+      if (config.autoHttpsEnabled()) {
+        // Initialize auto-HTTPS
+        cm = new CertificateManager(
+            config.acmeEmail(),
+            config.acmeStaging(),
+            config.acmeCertDir(),
+            config.allowedDomains()
+        );
+
+        SslWrapper sslWrapper = new SslWrapper(cm);
+
+        sl = new ServerLoop(
+            port, router, sslWrapper, cm,
+            config.httpsPort(),
+            config.httpToHttpsRedirect()
+        );
+
+        System.out.println("[Server] Auto-HTTPS enabled");
+        System.out.println("[Server]   ACME email: " + config.acmeEmail());
+        System.out.println("[Server]   HTTPS port: " + config.httpsPort());
+        System.out.println("[Server]   Staging: " + config.acmeStaging());
+        System.out.println("[Server]   HTTP→HTTPS redirect: " + config.httpToHttpsRedirect());
+        if (!config.allowedDomains().isEmpty()) {
+          System.out.println("[Server]   Allowed domains: "
+                                 + String.join(", ", config.allowedDomains()));
+        }
+      } else {
+        sl = new ServerLoop(port, router);
+      }
+    } catch (Exception e) {
+      System.err.println("[Server] Failed to initialize: " + e.getMessage());
+      // Fallback to plain HTTP
+      sl = new ServerLoop(port, router);
+      cm = null;
+    }
+
+    this.certManager = cm;
+    this.serverLoop = sl;
   }
 
   /**
@@ -114,11 +168,13 @@ public final class NanoServer {
    * @throws IOException if the server cannot bind to the port
    */
   public void start() throws IOException {
-    // Load initial configuration
-    router.loadConfig();
-
     // Start hot-reload watcher in a virtual thread
     router.startHotReloadWatcher();
+
+    // Start certificate renewal scheduler if auto-HTTPS is enabled
+    if (certManager != null) {
+      certManager.startRenewalScheduler();
+    }
 
     printStartupBanner();
 
@@ -132,6 +188,9 @@ public final class NanoServer {
   public void shutdown() {
     serverLoop.stop();
     router.stop();
+    if (certManager != null) {
+      certManager.stop();
+    }
     System.out.println("[Server] Shutdown initiated");
   }
 
@@ -158,6 +217,9 @@ public final class NanoServer {
     System.out.println("[Server] Using Virtual Threads (Project Loom)");
     System.out.println("[Server] Using FFM API for off-heap memory (Project Panama)");
     System.out.println("[Server] Configuration hot-reload enabled");
+    if (serverLoop.isAutoHttps()) {
+      System.out.println("[Server] Auto-HTTPS enabled (Caddy-style automatic certificates)");
+    }
     System.out.println("[Server] Ready to accept connections!");
     System.out.println();
   }

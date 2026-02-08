@@ -89,5 +89,21 @@
     "maxRequestSize": 10485760,
     "maxResponseSize": 52428800,
     "bufferSize": 8192
+  },
+  "autoHttps": {
+    "enabled": false,
+    "email": "admin@example.com",
+    "domains": [
+      "example.com",
+      "www.example.com"
+    ],
+    "staging": true,
+    "certDir": "certs",
+    "httpsPort": 443,
+    "httpToHttpsRedirect": true,
+    "allowedDomains": [
+      "example.com",
+      "*.example.com"
+    ]
   }
 }

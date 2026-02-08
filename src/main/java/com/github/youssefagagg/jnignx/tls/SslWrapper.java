@@ -2,16 +2,27 @@ package com.github.youssefagagg.jnignx.tls;
 
 import java.io.FileInputStream;
 import java.io.IOException;
+import java.net.Socket;
 import java.nio.ByteBuffer;
 import java.nio.channels.SocketChannel;
 import java.security.KeyStore;
+import java.security.Principal;
+import java.security.PrivateKey;
+import java.security.cert.X509Certificate;
+import java.util.Enumeration;
+import javax.net.ssl.ExtendedSSLSession;
+import javax.net.ssl.KeyManager;
 import javax.net.ssl.KeyManagerFactory;
+import javax.net.ssl.SNIHostName;
+import javax.net.ssl.SNIServerName;
 import javax.net.ssl.SSLContext;
 import javax.net.ssl.SSLEngine;
 import javax.net.ssl.SSLEngineResult;
 import javax.net.ssl.SSLException;
 import javax.net.ssl.SSLSession;
+import javax.net.ssl.StandardConstants;
 import javax.net.ssl.TrustManagerFactory;
+import javax.net.ssl.X509ExtendedKeyManager;
 
 /**
  * TLS/SSL wrapper using SSLEngine for secure connections.
@@ -23,6 +34,8 @@ import javax.net.ssl.TrustManagerFactory;
  * <ul>
  *   <li>TLS 1.2 and 1.3 support</li>
  *   <li>ALPN for HTTP/2 negotiation</li>
+ *   <li>SNI-based dynamic certificate selection (Caddy-style auto-HTTPS)</li>
+ *   <li>On-demand certificate provisioning via CertificateManager</li>
  *   <li>Zero-copy where possible</li>
  *   <li>Virtual thread compatible</li>
  * </ul>
@@ -32,9 +45,10 @@ public final class SslWrapper {
   private final SSLContext sslContext;
   private final String[] protocols;
   private final String[] cipherSuites;
+  private final CertificateManager certManager;
 
   /**
-   * Creates an SSL wrapper with the given keystore.
+   * Creates an SSL wrapper with the given keystore (static certificate mode).
    *
    * @param keystorePath     path to the keystore file (PKCS12 or JKS)
    * @param keystorePassword keystore password
@@ -44,6 +58,23 @@ public final class SslWrapper {
     this.sslContext = createSSLContext(keystorePath, keystorePassword);
     this.protocols = new String[] {"TLSv1.3", "TLSv1.2"};
     this.cipherSuites = null; // Use default cipher suites
+    this.certManager = null;
+  }
+
+  /**
+   * Creates an SSL wrapper with dynamic certificate management (auto-HTTPS mode).
+   *
+   * <p>This constructor enables Caddy-style automatic HTTPS where certificates
+   * are provisioned on-demand based on the SNI hostname in the TLS ClientHello.
+   *
+   * @param certManager the certificate manager for on-demand cert provisioning
+   * @throws Exception if SSL context cannot be initialized
+   */
+  public SslWrapper(CertificateManager certManager) throws Exception {
+    this.certManager = certManager;
+    this.sslContext = createDynamicSSLContext(certManager);
+    this.protocols = new String[] {"TLSv1.3", "TLSv1.2"};
+    this.cipherSuites = null;
   }
 
   /**
@@ -69,6 +100,23 @@ public final class SslWrapper {
   }
 
   /**
+   * Creates an SSL context with dynamic SNI-based certificate selection.
+   *
+   * <p>Uses a custom X509ExtendedKeyManager that intercepts the SNI hostname
+   * from the TLS ClientHello and delegates to CertificateManager for
+   * on-demand certificate provisioning.
+   */
+  private SSLContext createDynamicSSLContext(CertificateManager certManager) throws Exception {
+    SSLContext context = SSLContext.getInstance("TLS");
+    context.init(
+        new KeyManager[] {new SniKeyManager(certManager)},
+        null, // Default trust managers
+        null  // Default SecureRandom
+    );
+    return context;
+  }
+
+  /**
    * Wraps a socket channel with SSL/TLS.
    *
    * @param channel the socket channel to wrap
@@ -87,12 +135,166 @@ public final class SslWrapper {
     try {
       javax.net.ssl.SSLParameters params = engine.getSSLParameters();
       params.setApplicationProtocols(new String[] {"h2", "http/1.1"});
+
+      // Enable SNI matching for dynamic cert selection
+      if (certManager != null) {
+        params.setSNIMatchers(java.util.List.of(
+            javax.net.ssl.SNIMatcher.class.cast(
+                new javax.net.ssl.SNIMatcher(StandardConstants.SNI_HOST_NAME) {
+                  @Override
+                  public boolean matches(SNIServerName serverName) {
+                    // Accept all SNI names — cert selection happens in SniKeyManager
+                    return true;
+                  }
+                })
+        ));
+      }
+
       engine.setSSLParameters(params);
     } catch (Exception e) {
       // ALPN not supported, continue with HTTP/1.1 only
     }
 
     return new SslSession(engine, channel);
+  }
+
+  /**
+   * Checks if this wrapper uses dynamic certificate management.
+   */
+  public boolean isDynamic() {
+    return certManager != null;
+  }
+
+  /**
+   * Gets the certificate manager (if using auto-HTTPS mode).
+   */
+  public CertificateManager getCertificateManager() {
+    return certManager;
+  }
+
+  /**
+   * SNI-aware KeyManager that selects certificates based on the requested hostname.
+   *
+   * <p>This is the core of the Caddy-style auto-HTTPS functionality.
+   * When a TLS ClientHello arrives with an SNI hostname, this key manager:
+   * <ol>
+   *   <li>Extracts the SNI hostname from the SSL session</li>
+   *   <li>Asks the CertificateManager for a certificate (cached or on-demand)</li>
+   *   <li>Returns the appropriate private key and certificate chain</li>
+   * </ol>
+   */
+  private static final class SniKeyManager extends X509ExtendedKeyManager {
+
+    private final CertificateManager certManager;
+
+    SniKeyManager(CertificateManager certManager) {
+      this.certManager = certManager;
+    }
+
+    @Override
+    public String chooseEngineServerAlias(String keyType, Principal[] issuers, SSLEngine engine) {
+      // Extract SNI hostname from the engine's SSL session
+      String sniHostname = extractSniHostname(engine);
+      if (sniHostname != null) {
+        // Use the domain as the alias — the KeyStore will be fetched in getPrivateKey/getCertChain
+        return "sni:" + sniHostname;
+      }
+      return null;
+    }
+
+    @Override
+    public PrivateKey getPrivateKey(String alias) {
+      if (alias != null && alias.startsWith("sni:")) {
+        String domain = alias.substring(4);
+        KeyStore keyStore = certManager.getCertificate(domain);
+        if (keyStore != null) {
+          try {
+            Enumeration<String> aliases = keyStore.aliases();
+            while (aliases.hasMoreElements()) {
+              String ksAlias = aliases.nextElement();
+              if (keyStore.isKeyEntry(ksAlias)) {
+                return (PrivateKey) keyStore.getKey(ksAlias, "changeit".toCharArray());
+              }
+            }
+          } catch (Exception e) {
+            System.err.println("[SniKeyManager] Failed to get private key for " + domain
+                                   + ": " + e.getMessage());
+          }
+        }
+      }
+      return null;
+    }
+
+    @Override
+    public X509Certificate[] getCertificateChain(String alias) {
+      if (alias != null && alias.startsWith("sni:")) {
+        String domain = alias.substring(4);
+        KeyStore keyStore = certManager.getCertificate(domain);
+        if (keyStore != null) {
+          try {
+            Enumeration<String> aliases = keyStore.aliases();
+            while (aliases.hasMoreElements()) {
+              String ksAlias = aliases.nextElement();
+              if (keyStore.isKeyEntry(ksAlias)) {
+                java.security.cert.Certificate[] chain = keyStore.getCertificateChain(ksAlias);
+                if (chain != null) {
+                  X509Certificate[] x509Chain = new X509Certificate[chain.length];
+                  for (int i = 0; i < chain.length; i++) {
+                    x509Chain[i] = (X509Certificate) chain[i];
+                  }
+                  return x509Chain;
+                }
+              }
+            }
+          } catch (Exception e) {
+            System.err.println("[SniKeyManager] Failed to get cert chain for " + domain
+                                   + ": " + e.getMessage());
+          }
+        }
+      }
+      return null;
+    }
+
+    /**
+     * Extracts the SNI hostname from the SSLEngine's handshake session.
+     */
+    private String extractSniHostname(SSLEngine engine) {
+      try {
+        SSLSession session = engine.getHandshakeSession();
+        if (session instanceof ExtendedSSLSession extSession) {
+          for (SNIServerName sniName : extSession.getRequestedServerNames()) {
+            if (sniName.getType() == StandardConstants.SNI_HOST_NAME) {
+              return ((SNIHostName) sniName).getAsciiName();
+            }
+          }
+        }
+      } catch (Exception e) {
+        // Ignore — no SNI available
+      }
+      return null;
+    }
+
+    // Required interface methods — not used for server-side SNI selection
+
+    @Override
+    public String[] getClientAliases(String keyType, Principal[] issuers) {
+      return null;
+    }
+
+    @Override
+    public String chooseClientAlias(String[] keyType, Principal[] issuers, Socket socket) {
+      return null;
+    }
+
+    @Override
+    public String[] getServerAliases(String keyType, Principal[] issuers) {
+      return null;
+    }
+
+    @Override
+    public String chooseServerAlias(String keyType, Principal[] issuers, Socket socket) {
+      return null;
+    }
   }
 
   /**

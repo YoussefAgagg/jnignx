@@ -113,6 +113,22 @@ The only required field is `routes`:
     "maxRequestSize": 10485760,
     "maxResponseSize": 52428800,
     "bufferSize": 8192
+  },
+  "autoHttps": {
+    "enabled": true,
+    "email": "admin@example.com",
+    "domains": [
+      "example.com",
+      "www.example.com"
+    ],
+    "staging": false,
+    "certDir": "certs",
+    "httpsPort": 443,
+    "httpToHttpsRedirect": true,
+    "allowedDomains": [
+      "example.com",
+      "*.example.com"
+    ]
   }
 }
 ```
@@ -423,6 +439,76 @@ Request and response size limits.
   }
 }
 ```
+
+---
+
+### `autoHttps`
+
+Enables Caddy-style automatic HTTPS with on-demand certificate provisioning via ACME (Let's Encrypt).
+
+When enabled, the server runs in **dual-port mode**: an HTTP port handles ACME HTTP-01 challenges and optionally
+redirects to HTTPS, while the HTTPS port terminates TLS with automatically provisioned certificates.
+
+| Field                 | Type     | Default   | Description                                                                                         |
+|-----------------------|----------|-----------|-----------------------------------------------------------------------------------------------------|
+| `enabled`             | boolean  | `false`   | Enable automatic HTTPS                                                                              |
+| `email`               | string   | `""`      | Contact email for Let's Encrypt notifications (required for production)                             |
+| `domains`             | string[] | `[]`      | Domains to pre-provision certificates for at startup                                                |
+| `staging`             | boolean  | `false`   | Use Let's Encrypt staging environment (for testing)                                                 |
+| `certDir`             | string   | `"certs"` | Directory for storing cached certificates                                                           |
+| `httpsPort`           | int      | `443`     | Port for the HTTPS listener                                                                         |
+| `httpToHttpsRedirect` | boolean  | `true`    | Redirect HTTP requests to HTTPS with `301 Moved Permanently`                                        |
+| `allowedDomains`      | string[] | `[]`      | Domains allowed for on-demand cert issuance (empty = allow all). Supports `*.example.com` wildcards |
+
+```json
+{
+  "autoHttps": {
+    "enabled": true,
+    "email": "admin@example.com",
+    "domains": [
+      "example.com",
+      "www.example.com"
+    ],
+    "staging": false,
+    "certDir": "certs",
+    "httpsPort": 443,
+    "httpToHttpsRedirect": true,
+    "allowedDomains": [
+      "example.com",
+      "*.example.com"
+    ]
+  }
+}
+```
+
+**How it works:**
+
+1. Client connects to the HTTPS port (e.g., 443)
+2. The TLS ClientHello contains an SNI hostname (e.g., `app.example.com`)
+3. The `SniKeyManager` checks: is there a cached certificate for this domain?
+    - **YES** → use cached cert, complete the TLS handshake
+    - **NO** → check if the domain is in `allowedDomains`, then obtain a certificate via ACME on-the-fly, cache it,
+      and complete the handshake
+4. Normal HTTP routing proceeds over the encrypted connection
+5. A background scheduler renews certificates 30 days before expiration
+
+**Minimal auto-HTTPS config:**
+
+```json
+{
+  "routes": {
+    "/": [
+      "http://localhost:3000"
+    ]
+  },
+  "autoHttps": {
+    "enabled": true,
+    "email": "admin@example.com"
+  }
+}
+```
+
+This listens on HTTP port 8080 (for ACME challenges + redirect) and HTTPS port 443, allowing any domain.
 
 ---
 

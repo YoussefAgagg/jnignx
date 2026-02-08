@@ -72,6 +72,16 @@ public final class ServerConfig {
   private final long maxResponseSize;
   private final int bufferSize;
 
+  // Auto-HTTPS / TLS
+  private final boolean autoHttpsEnabled;
+  private final String acmeEmail;
+  private final List<String> acmeDomains;
+  private final boolean acmeStaging;
+  private final String acmeCertDir;
+  private final int httpsPort;
+  private final boolean httpToHttpsRedirect;
+  private final List<String> allowedDomains;
+
   private ServerConfig(Builder builder) {
     this.routes = Map.copyOf(builder.routes);
     this.domainRoutes = Map.copyOf(builder.domainRoutes);
@@ -108,6 +118,15 @@ public final class ServerConfig {
     this.maxRequestSize = builder.maxRequestSize;
     this.maxResponseSize = builder.maxResponseSize;
     this.bufferSize = builder.bufferSize;
+
+    this.autoHttpsEnabled = builder.autoHttpsEnabled;
+    this.acmeEmail = builder.acmeEmail;
+    this.acmeDomains = List.copyOf(builder.acmeDomains);
+    this.acmeStaging = builder.acmeStaging;
+    this.acmeCertDir = builder.acmeCertDir;
+    this.httpsPort = builder.httpsPort;
+    this.httpToHttpsRedirect = builder.httpToHttpsRedirect;
+    this.allowedDomains = List.copyOf(builder.allowedDomains);
   }
 
   public static Builder builder() {
@@ -231,6 +250,38 @@ public final class ServerConfig {
     return bufferSize;
   }
 
+  public boolean autoHttpsEnabled() {
+    return autoHttpsEnabled;
+  }
+
+  public String acmeEmail() {
+    return acmeEmail;
+  }
+
+  public List<String> acmeDomains() {
+    return acmeDomains;
+  }
+
+  public boolean acmeStaging() {
+    return acmeStaging;
+  }
+
+  public String acmeCertDir() {
+    return acmeCertDir;
+  }
+
+  public int httpsPort() {
+    return httpsPort;
+  }
+
+  public boolean httpToHttpsRedirect() {
+    return httpToHttpsRedirect;
+  }
+
+  public List<String> allowedDomains() {
+    return allowedDomains;
+  }
+
   /**
    * Converts to legacy RouteConfig for backward compatibility.
    */
@@ -276,6 +327,16 @@ public final class ServerConfig {
     private long maxRequestSize = 10 * 1024 * 1024L; // 10MB
     private long maxResponseSize = 50 * 1024 * 1024L; // 50MB
     private int bufferSize = 8192;
+
+    // Auto-HTTPS defaults
+    private boolean autoHttpsEnabled = false;
+    private String acmeEmail = "";
+    private List<String> acmeDomains = List.of();
+    private boolean acmeStaging = false;
+    private String acmeCertDir = "certs";
+    private int httpsPort = 443;
+    private boolean httpToHttpsRedirect = true;
+    private List<String> allowedDomains = List.of();
 
     public Builder routes(Map<String, List<String>> routes) {
       this.routes = routes;
@@ -362,6 +423,31 @@ public final class ServerConfig {
       this.maxRequestSize = maxRequestSize;
       this.maxResponseSize = maxResponseSize;
       this.bufferSize = bufferSize;
+      return this;
+    }
+
+    public Builder autoHttps(boolean enabled, String email, List<String> domains,
+                             boolean staging, String certDir) {
+      this.autoHttpsEnabled = enabled;
+      this.acmeEmail = email != null ? email : "";
+      this.acmeDomains = domains != null ? domains : List.of();
+      this.acmeStaging = staging;
+      this.acmeCertDir = certDir != null ? certDir : "certs";
+      return this;
+    }
+
+    public Builder httpsPort(int port) {
+      this.httpsPort = port;
+      return this;
+    }
+
+    public Builder httpToHttpsRedirect(boolean redirect) {
+      this.httpToHttpsRedirect = redirect;
+      return this;
+    }
+
+    public Builder allowedDomains(List<String> domains) {
+      this.allowedDomains = domains != null ? domains : List.of();
       return this;
     }
 
