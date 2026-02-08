@@ -68,6 +68,41 @@ Foreign Function & Memory API (Project Panama) for high concurrency and low-late
 - **Java 25** with preview features enabled
 - **GraalVM** (optional, for native image compilation)
 
+## Download
+
+### Pre-built Native Binary (Linux x86-64)
+
+Download the latest native binary from the [latest release](https://github.com/youssefagagg/jnignx/releases/tag/latest):
+
+```bash
+# Download the latest build
+curl -L -o jnignx https://github.com/youssefagagg/jnignx/releases/download/latest/jnignx
+chmod +x jnignx
+./jnignx
+```
+
+> **Note:** The `latest` release is automatically updated on every push to `main` and may be unstable.
+> For stable versions, download from a [tagged release](https://github.com/youssefagagg/jnignx/releases) (e.g.,
+`v1.0.0`).
+
+### Stable Releases
+
+Tagged releases are created when a version tag (e.g., `v1.0.0`) is pushed:
+
+```bash
+# Download a specific version
+curl -L -o jnignx https://github.com/youssefagagg/jnignx/releases/download/v1.0.0/jnignx
+chmod +x jnignx
+```
+
+Browse all releases: [github.com/youssefagagg/jnignx/releases](https://github.com/youssefagagg/jnignx/releases)
+
+### Build Artifacts
+
+Each CI build also uploads the native binary as a GitHub Actions artifact (retained for 30 days).
+You can download it from the [Actions tab](https://github.com/youssefagagg/jnignx/actions/workflows/native-build.yml) —
+select a workflow run and look for the **jnignx-linux-amd64** artifact.
+
 ## Quick Start
 
 ```bash
