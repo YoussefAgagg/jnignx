@@ -1,7 +1,5 @@
 package com.github.youssefagagg.jnignx.tls;
 
-import java.io.ByteArrayInputStream;
-import java.io.FileOutputStream;
 import java.io.IOException;
 import java.net.http.HttpClient;
 import java.nio.file.Files;
@@ -9,8 +7,6 @@ import java.nio.file.Path;
 import java.security.KeyPair;
 import java.security.KeyPairGenerator;
 import java.security.KeyStore;
-import java.security.cert.Certificate;
-import java.security.cert.CertificateFactory;
 import java.security.cert.X509Certificate;
 import java.time.Duration;
 import java.time.Instant;
@@ -131,11 +127,8 @@ public final class AcmeClient {
     // 6. Finalize order (generate CSR)
     String certUrl = finalizeOrder(orderUrl);
 
-    // 7. Download certificate
-    String certPem = downloadCertificate(certUrl);
-
-    // 8. Save to keystore
-    return saveCertificate(certPem);
+    // 7. Download certificate and save to keystore
+    return downloadAndSaveCertificate(certUrl);
   }
 
   /**
@@ -257,47 +250,48 @@ public final class AcmeClient {
   }
 
   /**
-   * Downloads the issued certificate.
+   * Downloads the issued certificate and saves it to a PKCS12 keystore.
+   *
+   * <p>Full implementation would GET certificate in PEM format from the ACME server
+   * and parse it. For now, generates a self-signed certificate as a placeholder
+   * using keytool.
    */
-  private String downloadCertificate(String certUrl) throws Exception {
+  private Path downloadAndSaveCertificate(String certUrl) throws Exception {
     System.out.println("[ACME] Downloading certificate");
-
-    // Full implementation would GET certificate in PEM format
-    // For now, return a placeholder
-    return "-----BEGIN CERTIFICATE-----\n...\n-----END CERTIFICATE-----";
-  }
-
-  /**
-   * Saves certificate to keystore.
-   */
-  private Path saveCertificate(String certPem) throws Exception {
     System.out.println("[ACME] Saving certificate");
 
-    // Parse certificate
-    CertificateFactory cf = CertificateFactory.getInstance("X.509");
-    Certificate cert = cf.generateCertificate(
-        new ByteArrayInputStream(certPem.getBytes())
-    );
-
-    currentCert = (X509Certificate) cert;
-
-    // Create keystore
-    KeyStore keyStore = KeyStore.getInstance("PKCS12");
-    keyStore.load(null, null);
-
-    // Add certificate and private key
-    keyStore.setKeyEntry(
-        "main",
-        accountKeyPair.getPrivate(),
-        "changeit".toCharArray(),
-        new Certificate[] {cert}
-    );
-
-    // Save keystore
     Path keystorePath = certPath.resolve("acme-cert.p12");
-    try (FileOutputStream fos = new FileOutputStream(keystorePath.toFile())) {
-      keyStore.store(fos, "changeit".toCharArray());
+    // Remove existing keystore to avoid "alias already exists" error
+    Files.deleteIfExists(keystorePath);
+    String dn = "CN=" + domains[0];
+
+    // Generate a self-signed certificate using keytool
+    ProcessBuilder pb = new ProcessBuilder(
+        "keytool", "-genkeypair",
+        "-alias", "main",
+        "-keyalg", "RSA",
+        "-keysize", "2048",
+        "-validity", "90",
+        "-storetype", "PKCS12",
+        "-keystore", keystorePath.toString(),
+        "-storepass", "changeit",
+        "-keypass", "changeit",
+        "-dname", dn
+    );
+    pb.redirectErrorStream(true);
+    Process process = pb.start();
+    int exitCode = process.waitFor();
+    if (exitCode != 0) {
+      String output = new String(process.getInputStream().readAllBytes());
+      throw new IOException("keytool failed (exit " + exitCode + "): " + output);
     }
+
+    // Load the generated keystore to extract the certificate
+    KeyStore keyStore = KeyStore.getInstance("PKCS12");
+    try (var fis = Files.newInputStream(keystorePath)) {
+      keyStore.load(fis, "changeit".toCharArray());
+    }
+    currentCert = (X509Certificate) keyStore.getCertificate("main");
 
     System.out.println("[ACME] Certificate saved to: " + keystorePath);
     return keystorePath;

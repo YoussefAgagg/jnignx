@@ -159,6 +159,44 @@ class CertificateManagerTest {
   }
 
   @Test
+  void testObtainCertificateDoesNotThrowBase64Error() throws Exception {
+    // Reproduce the bug: obtainCertificate previously failed with
+    // "Illegal base64 character 2e" because the placeholder PEM contained '...'
+    AcmeClient acme = new AcmeClient("test@example.com", true, "test.youssefagagg.dev");
+    Path keystorePath = acme.obtainCertificate();
+
+    assertNotNull(keystorePath, "Keystore path should not be null");
+    assertTrue(Files.exists(keystorePath), "Keystore file should exist");
+
+    // Verify the keystore can be loaded
+    KeyStore ks = KeyStore.getInstance("PKCS12");
+    try (var fis = Files.newInputStream(keystorePath)) {
+      ks.load(fis, "changeit".toCharArray());
+    }
+    assertTrue(ks.aliases().hasMoreElements(), "KeyStore should contain at least one entry");
+
+    // Verify the certificate is valid
+    assertNotNull(acme.getCurrentCertificate(), "Current certificate should not be null");
+    assertTrue(acme.getDaysUntilExpiry() > 0, "Certificate should not be expired");
+
+    // Cleanup
+    Files.deleteIfExists(keystorePath);
+  }
+
+  @Test
+  void testGetCertificateProvisionsCertSuccessfully() {
+    CertificateManager cm = new CertificateManager(
+        "test@example.com", true, tempDir.toString(), List.of());
+
+    // This should trigger on-demand provisioning without the base64 error
+    KeyStore ks = cm.getCertificate("test.example.com");
+    assertNotNull(ks, "KeyStore should be provisioned on-demand for allowed domain");
+    assertTrue(cm.hasCertificate("test.example.com"));
+    assertEquals(1, cm.getCachedCertCount());
+    assertNotNull(cm.getCertificateExpiry("test.example.com"));
+  }
+
+  @Test
   void testStopDoesNotThrow() {
     CertificateManager cm = new CertificateManager(
         "test@example.com", true, tempDir.toString(), List.of());
