@@ -96,6 +96,42 @@ public final class CertificateManager {
   }
 
   /**
+   * Pre-provisions certificates for the given domains at startup.
+   *
+   * <p>This avoids blocking the first HTTPS connection while waiting for
+   * ACME certificate issuance (which can take 10-30 seconds).
+   *
+   * @param domains the domains to pre-provision certificates for
+   */
+  public void preProvisionCertificates(List<String> domains) {
+    if (domains == null || domains.isEmpty()) {
+      return;
+    }
+    for (String domain : domains) {
+      String normalized = domain.toLowerCase().trim();
+      if (normalized.startsWith("*.")) {
+        // Skip wildcard domains — they can't be pre-provisioned individually
+        continue;
+      }
+      if (certCache.containsKey(normalized) && !isExpiringSoon(normalized)) {
+        System.out.println("[CertManager] Certificate already cached for: " + normalized);
+        continue;
+      }
+      if (!isDomainAllowed(normalized)) {
+        System.out.println("[CertManager] Skipping non-allowed domain: " + normalized);
+        continue;
+      }
+      try {
+        System.out.println("[CertManager] Pre-provisioning certificate for: " + normalized);
+        provisionCertificate(normalized);
+      } catch (Exception e) {
+        System.err.println("[CertManager] Pre-provisioning failed for " + normalized
+                               + ": " + e.getMessage());
+      }
+    }
+  }
+
+  /**
    * Starts the automatic certificate renewal scheduler.
    */
   public void startRenewalScheduler() {

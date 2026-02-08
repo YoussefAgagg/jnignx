@@ -331,62 +331,77 @@ public final class SslWrapper {
      */
     public void doHandshake() throws IOException {
       engine.beginHandshake();
+      SSLEngineResult.HandshakeStatus hsStatus = engine.getHandshakeStatus();
 
-      while (!handshakeComplete) {
-        SSLEngineResult.HandshakeStatus status = engine.getHandshakeStatus();
+      while (hsStatus != SSLEngineResult.HandshakeStatus.FINISHED
+          && hsStatus != SSLEngineResult.HandshakeStatus.NOT_HANDSHAKING) {
 
-        switch (status) {
-          case NEED_WRAP:
+        switch (hsStatus) {
+          case NEED_WRAP: {
             outNetBuffer.clear();
-            SSLEngineResult wrapResult = engine.wrap(outAppBuffer, outNetBuffer);
+            // Use an empty buffer as the source — no application data during handshake
+            ByteBuffer empty = ByteBuffer.allocate(0);
+            SSLEngineResult wrapResult = engine.wrap(empty, outNetBuffer);
+            hsStatus = wrapResult.getHandshakeStatus();
             outNetBuffer.flip();
             while (outNetBuffer.hasRemaining()) {
               channel.write(outNetBuffer);
             }
-            if (wrapResult.getHandshakeStatus() == SSLEngineResult.HandshakeStatus.FINISHED) {
-              handshakeComplete = true;
-            }
             break;
+          }
 
-          case NEED_UNWRAP:
-            // Read more data from the network if needed
-            int bytesRead = channel.read(inNetBuffer);
-            if (bytesRead < 0) {
-              throw new SSLException("Connection closed during handshake");
+          case NEED_UNWRAP: {
+            // Read network data if the buffer is empty
+            if (inNetBuffer.position() == 0) {
+              int bytesRead = channel.read(inNetBuffer);
+              if (bytesRead < 0) {
+                throw new SSLException("Connection closed during handshake");
+              }
             }
             inNetBuffer.flip();
             SSLEngineResult unwrapResult = engine.unwrap(inNetBuffer, inAppBuffer);
             inNetBuffer.compact();
 
-            // Handle BUFFER_UNDERFLOW: need more network data before unwrap can proceed
-            while (unwrapResult.getStatus() == SSLEngineResult.Status.BUFFER_UNDERFLOW) {
-              bytesRead = channel.read(inNetBuffer);
-              if (bytesRead < 0) {
-                throw new SSLException("Connection closed during handshake");
-              }
-              inNetBuffer.flip();
-              unwrapResult = engine.unwrap(inNetBuffer, inAppBuffer);
-              inNetBuffer.compact();
+            switch (unwrapResult.getStatus()) {
+              case BUFFER_UNDERFLOW:
+                // Need more network data — read and retry
+                int bytesRead = channel.read(inNetBuffer);
+                if (bytesRead < 0) {
+                  throw new SSLException("Connection closed during handshake");
+                }
+                break;
+              case BUFFER_OVERFLOW:
+                // Application buffer too small — enlarge and retry
+                int appSize = engine.getSession().getApplicationBufferSize();
+                if (appSize > inAppBuffer.capacity()) {
+                  // In practice this shouldn't happen with initial sizing
+                  throw new SSLException("Application buffer overflow during handshake");
+                }
+                inAppBuffer.clear();
+                break;
+              case CLOSED:
+                throw new SSLException("SSLEngine closed during handshake");
+              case OK:
+                break;
             }
-
-            if (unwrapResult.getHandshakeStatus() == SSLEngineResult.HandshakeStatus.FINISHED) {
-              handshakeComplete = true;
-            }
+            hsStatus = unwrapResult.getHandshakeStatus();
             break;
+          }
 
-          case NEED_TASK:
+          case NEED_TASK: {
             Runnable task;
             while ((task = engine.getDelegatedTask()) != null) {
               task.run();
             }
+            hsStatus = engine.getHandshakeStatus();
             break;
+          }
 
-          case FINISHED:
-          case NOT_HANDSHAKING:
-            handshakeComplete = true;
+          default:
             break;
         }
       }
+      handshakeComplete = true;
     }
 
     /**
@@ -401,31 +416,46 @@ public final class SslWrapper {
         doHandshake();
       }
 
-      // Try to unwrap from existing network buffer
+      // Try to unwrap from existing network buffer (leftover from handshake or prior read)
       if (inNetBuffer.position() > 0) {
         inNetBuffer.flip();
-        engine.unwrap(inNetBuffer, inAppBuffer);
+        SSLEngineResult result = engine.unwrap(inNetBuffer, inAppBuffer);
         inNetBuffer.compact();
+        // Handle renegotiation during read
+        if (result.getHandshakeStatus() == SSLEngineResult.HandshakeStatus.NEED_TASK) {
+          Runnable task;
+          while ((task = engine.getDelegatedTask()) != null) {
+            task.run();
+          }
+        }
       }
 
-      // Read more data if needed
+      // Read more data if needed — do NOT clear inNetBuffer, compact preserves leftovers
       while (inAppBuffer.position() == 0) {
-        inNetBuffer.clear();
         int bytesRead = channel.read(inNetBuffer);
         if (bytesRead < 0) {
           return -1;
         }
         inNetBuffer.flip();
-        engine.unwrap(inNetBuffer, inAppBuffer);
+        SSLEngineResult result = engine.unwrap(inNetBuffer, inAppBuffer);
         inNetBuffer.compact();
+        if (result.getHandshakeStatus() == SSLEngineResult.HandshakeStatus.NEED_TASK) {
+          Runnable task;
+          while ((task = engine.getDelegatedTask()) != null) {
+            task.run();
+          }
+        }
       }
 
       // Transfer decrypted data
       inAppBuffer.flip();
       int toCopy = Math.min(inAppBuffer.remaining(), dst.remaining());
-      ByteBuffer slice = inAppBuffer.slice().limit(toCopy);
-      dst.put(slice);
-      inAppBuffer.position(inAppBuffer.position() + toCopy);
+      if (toCopy > 0) {
+        int oldLimit = inAppBuffer.limit();
+        inAppBuffer.limit(inAppBuffer.position() + toCopy);
+        dst.put(inAppBuffer);
+        inAppBuffer.limit(oldLimit);
+      }
       inAppBuffer.compact();
 
       return toCopy;

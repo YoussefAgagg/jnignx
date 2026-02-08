@@ -9,6 +9,7 @@ import java.nio.ByteBuffer;
 import java.nio.channels.ServerSocketChannel;
 import java.nio.channels.SocketChannel;
 import java.nio.charset.StandardCharsets;
+import java.util.List;
 
 /**
  * Main server loop that accepts connections and spawns workers.
@@ -28,6 +29,7 @@ public class ServerLoop {
   private final CertificateManager certManager;
   private final int httpsPort;
   private final boolean httpToHttpsRedirect;
+  private final List<String> acmeDomains;
   private volatile boolean running;
   private ServerSocketChannel serverChannel;
   private ServerSocketChannel httpsServerChannel;
@@ -36,7 +38,7 @@ public class ServerLoop {
    * Creates a ServerLoop without TLS (HTTP only).
    */
   public ServerLoop(int port, Router router) {
-    this(port, router, null, null, 0, false);
+    this(port, router, null, null, 0, false, List.of());
   }
 
   /**
@@ -47,7 +49,7 @@ public class ServerLoop {
    * @param sslWrapper optional SSL wrapper for HTTPS (null for HTTP)
    */
   public ServerLoop(int port, Router router, SslWrapper sslWrapper) {
-    this(port, router, sslWrapper, null, 0, false);
+    this(port, router, sslWrapper, null, 0, false, List.of());
   }
 
   /**
@@ -63,12 +65,30 @@ public class ServerLoop {
   public ServerLoop(int httpPort, Router router, SslWrapper sslWrapper,
                     CertificateManager certManager, int httpsPort,
                     boolean httpToHttpsRedirect) {
+    this(httpPort, router, sslWrapper, certManager, httpsPort, httpToHttpsRedirect, List.of());
+  }
+
+  /**
+   * Creates a ServerLoop with auto-HTTPS support and domain pre-provisioning.
+   *
+   * @param httpPort            the HTTP port (for redirects and ACME challenges)
+   * @param router              the request router
+   * @param sslWrapper          the SSL wrapper with dynamic cert management
+   * @param certManager         the certificate manager for on-demand provisioning
+   * @param httpsPort           the HTTPS port to listen on
+   * @param httpToHttpsRedirect whether to redirect HTTP to HTTPS
+   * @param acmeDomains         domains to pre-provision certificates for at startup
+   */
+  public ServerLoop(int httpPort, Router router, SslWrapper sslWrapper,
+                    CertificateManager certManager, int httpsPort,
+                    boolean httpToHttpsRedirect, List<String> acmeDomains) {
     this.port = httpPort;
     this.router = router;
     this.sslWrapper = sslWrapper;
     this.certManager = certManager;
     this.httpsPort = httpsPort;
     this.httpToHttpsRedirect = httpToHttpsRedirect;
+    this.acmeDomains = acmeDomains != null ? acmeDomains : List.of();
     this.running = true;
   }
 
@@ -115,6 +135,11 @@ public class ServerLoop {
       System.out.println("[Server] HTTP listening on port " + port
                              +
                              (httpToHttpsRedirect ? " (redirect → HTTPS)" : " (ACME challenges)"));
+
+      // Pre-provision certificates for configured domains (requires HTTP listener for ACME)
+      if (certManager != null && !acmeDomains.isEmpty()) {
+        Thread.startVirtualThread(() -> certManager.preProvisionCertificates(acmeDomains));
+      }
 
       while (running && channel.isOpen()) {
         try {

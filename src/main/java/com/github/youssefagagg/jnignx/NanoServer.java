@@ -92,7 +92,8 @@ public final class NanoServer {
         sl = new ServerLoop(
             port, router, sslWrapper, cm,
             config.httpsPort(),
-            config.httpToHttpsRedirect()
+            config.httpToHttpsRedirect(),
+            config.acmeDomains()
         );
 
         System.out.println("[Server] Auto-HTTPS enabled");
