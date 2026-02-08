@@ -131,10 +131,10 @@ public final class SslWrapper {
       engine.setEnabledCipherSuites(cipherSuites);
     }
 
-    // Enable ALPN for HTTP/2 if available
+    // Configure ALPN — only advertise HTTP/1.1 (HTTP/2 is stubbed, not fully implemented)
     try {
       javax.net.ssl.SSLParameters params = engine.getSSLParameters();
-      params.setApplicationProtocols(new String[] {"h2", "http/1.1"});
+      params.setApplicationProtocols(new String[] {"http/1.1"});
 
       // Enable SNI matching for dynamic cert selection
       if (certManager != null) {
