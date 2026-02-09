@@ -98,8 +98,17 @@ public class StaticHandler {
   /**
    * Serves a static file or directory.
    *
+   * <p>The {@code rootPath} may point to either a specific file or a directory:
+   * <ul>
+   *   <li>If it points to a regular file (e.g., {@code file:///var/www/test.png}),
+   *       that file is served directly regardless of the request path.</li>
+   *   <li>If it points to a directory (e.g., {@code file:///var/www/html}),
+   *       the request path is resolved against the directory root.</li>
+   * </ul>
+   *
    * @param conn     the client connection
-   * @param rootPath the root directory path (e.g., "file:///var/www/html")
+   * @param rootPath the file or directory path (e.g., "file:///var/www/html" or
+   *                 "file:///var/www/test.png")
    * @param request  the parsed request
    * @throws IOException if an I/O error occurs
    */
@@ -117,6 +126,18 @@ public class StaticHandler {
     String rawRoot = rootPath.startsWith("file://") ? rootPath.substring(7) : rootPath;
     Path root = Path.of(rawRoot);
 
+    // If the root path points to a regular file, serve it directly
+    if (Files.isRegularFile(root)) {
+      serveFile(conn, root, request);
+      return;
+    }
+
+    if (!Files.exists(root)) {
+      handle404(conn);
+      return;
+    }
+
+    // Root is a directory — resolve request path against it
     // Remove leading slash to resolve correctly against root
     String relativePath = requestPath.startsWith("/") ? requestPath.substring(1) : requestPath;
     Path file = root.resolve(relativePath).normalize();

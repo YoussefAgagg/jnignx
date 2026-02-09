@@ -37,6 +37,50 @@ class StaticHandlerTest {
   }
 
   @Test
+  void testServeSpecificFile() throws Exception {
+    // Setup: create a specific file that the route points to directly
+    Path file = tempDir.resolve("test.png");
+    byte[] content = "fake-png-content".getBytes(StandardCharsets.UTF_8);
+    Files.write(file, content);
+
+    runTest(channel -> {
+      // The request path is the route prefix, but the backend points to a specific file
+      Request req = new Request("GET", "/assets", "HTTP/1.1", Map.of(), 0, false, 0);
+      new StaticHandler().handle(channel, "file://" + file.toAbsolutePath(), req);
+    }, response -> {
+      assertTrue(response.contains("HTTP/1.1 200 OK"));
+      assertTrue(response.contains("Content-Type: image/png"));
+      assertTrue(response.contains("fake-png-content"));
+    });
+  }
+
+  @Test
+  void testServeSpecificFileWithSubpath() throws Exception {
+    // Even with a sub-path in the request, if backend is a file, serve that file
+    Path file = tempDir.resolve("data.json");
+    Files.writeString(file, "{\"key\":\"value\"}");
+
+    runTest(channel -> {
+      Request req = new Request("GET", "/api/data", "HTTP/1.1", Map.of(), 0, false, 0);
+      new StaticHandler().handle(channel, "file://" + file.toAbsolutePath(), req);
+    }, response -> {
+      assertTrue(response.contains("HTTP/1.1 200 OK"));
+      assertTrue(response.contains("Content-Type: application/json"));
+      assertTrue(response.contains("{\"key\":\"value\"}"));
+    });
+  }
+
+  @Test
+  void testNonExistentRootReturns404() throws Exception {
+    runTest(channel -> {
+      Request req = new Request("GET", "/missing", "HTTP/1.1", Map.of(), 0, false, 0);
+      new StaticHandler().handle(channel, "file://" + tempDir.resolve("nonexistent"), req);
+    }, response -> {
+      assertTrue(response.contains("HTTP/1.1 404 Not Found"));
+    });
+  }
+
+  @Test
   void testGzipCompression() throws Exception {
     // Setup
     Path file = tempDir.resolve("script.js");
